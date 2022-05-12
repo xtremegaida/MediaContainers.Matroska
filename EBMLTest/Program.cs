@@ -1,5 +1,10 @@
-﻿using EBML;
+﻿using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Running;
+using EBML;
 using System;
+using System.Collections.Concurrent;
+using System.IO;
 using System.Threading.Tasks;
 
 namespace EBMLTest
@@ -8,22 +13,343 @@ namespace EBMLTest
    {
       static void Main(string[] args)
       {
-         using (var queue = new DataQueue())
+         //var config = DefaultConfig.Instance;
+         //config = config.WithOptions(ConfigOptions.DisableOptimizationsValidator);
+         //BenchmarkRunner.Run<Test>(config);
+         //var x = new Test();
+         //x.TestFunc().Wait();
+         Task.Run(() => TestFunc()).Wait();
+      }
+
+      static async Task TestFunc()
+      {
+         MatroskaElementDefinition.RegisterFormat();
+         using (var buffer = new MemoryStream(File.ReadAllBytes("..\\..\\..\\a.webm")))
+         using (var doc = await EBMLDocumentReader.Read(buffer))
          {
-            var buffer = new byte[3];
-            var readTask = queue.ReadAsync(buffer, true).AsTask();
-            _ = Task.Run(async () =>
-            {
-               await Task.Delay(1);
-               await queue.WriteByteAsync(1);
-               await Task.Delay(1);
-               await queue.WriteAsync(new byte[] { 2, 3 });
-            });
-            //var timeout = Task.Delay(100);
-            //var done = await Task.WhenAny(readTask, timeout);
-            //Assert.AreNotEqual(timeout, done);
-            var read = readTask.Result;
+            Console.WriteLine(doc.Header.ToElement().ToFullString());
+            while (!doc.Body.IsFullyRead) { await doc.ReadNextElement(); }
+            Console.WriteLine(doc.Body.ToFullString());
          }
       }
    }
+
+   [MemoryDiagnoser]
+   [RyuJitX64Job]
+   public class Test
+   {
+      [Benchmark]
+      public async Task TestFunc()
+      {
+         var cache = new DataBufferCache();
+         var buffer = new byte[256];
+         using (var queue = new DataQueue(256, cache))
+         {
+            for (int i = 1 << 20; i > 0; i--)
+            {
+               await queue.WriteAsync(buffer);
+               await queue.ReadAsync(buffer);
+            }
+         }
+         //Console.WriteLine(cache.BufferMemoryReserveBytes);
+         //Console.WriteLine(cache.BufferMemoryUsedBytes);
+      }
+   }
 }
+/*
+\EBML:<MASTER>
+  \EBML\EBMLVersion:1
+  \EBML\EBMLReadVersion:1
+  \EBML\EBMLMaxIDLength:4
+  \EBML\EBMLMaxSizeLength:8
+  \EBML\DocType:webm
+  \EBML\DocTypeVersion:4
+  \EBML\DocTypeReadVersion:2
+
+\Segment:<MASTER>
+  \Segment\SeekHead:<MASTER>
+    \Segment\SeekHead\Seek:<MASTER>
+      \Segment\SeekHead\Seek\SeekID:<BINARY>
+      \Segment\SeekHead\Seek\SeekPosition:229
+    \Segment\SeekHead\Seek:<MASTER>
+      \Segment\SeekHead\Seek\SeekID:<BINARY>
+      \Segment\SeekHead\Seek\SeekPosition:284
+    \Segment\SeekHead\Seek:<MASTER>
+      \Segment\SeekHead\Seek\SeekID:<BINARY>
+      \Segment\SeekHead\Seek\SeekPosition:446
+    \Segment\SeekHead\Seek:<MASTER>
+      \Segment\SeekHead\Seek\SeekID:<BINARY>
+      \Segment\SeekHead\Seek\SeekPosition:375717
+  Void:<BINARY>
+  \Segment\Info:<MASTER>
+    \Segment\Info\TimestampScale:1000000
+    \Segment\Info\MuxingApp:Lavf58.29.100
+    \Segment\Info\WritingApp:Lavf58.29.100
+    \Segment\Info\Duration:6419
+  \Segment\Tracks:<MASTER>
+    \Segment\Tracks\TrackEntry:<MASTER>
+      \Segment\Tracks\TrackEntry\TrackNumber:1
+      \Segment\Tracks\TrackEntry\TrackUID:1
+      \Segment\Tracks\TrackEntry\FlagLacing:0
+      \Segment\Tracks\TrackEntry\Language:eng
+      \Segment\Tracks\TrackEntry\CodecID:V_VP9
+      \Segment\Tracks\TrackEntry\TrackType:1
+      \Segment\Tracks\TrackEntry\Video:<MASTER>
+        \Segment\Tracks\TrackEntry\Video\PixelWidth:960
+        \Segment\Tracks\TrackEntry\Video\PixelHeight:720
+        \Segment\Tracks\TrackEntry\Video\AlphaMode:1
+        \Segment\Tracks\TrackEntry\Video\Colour:<MASTER>
+          \Segment\Tracks\TrackEntry\Video\Colour\Range:1
+    \Segment\Tracks\TrackEntry:<MASTER>
+      \Segment\Tracks\TrackEntry\TrackNumber:2
+      \Segment\Tracks\TrackEntry\TrackUID:2
+      \Segment\Tracks\TrackEntry\FlagLacing:0
+      \Segment\Tracks\TrackEntry\Language:eng
+      \Segment\Tracks\TrackEntry\CodecID:A_OPUS
+      \Segment\Tracks\TrackEntry\SeekPreRoll:80000000
+      \Segment\Tracks\TrackEntry\TrackType:2
+      \Segment\Tracks\TrackEntry\Audio:<MASTER>
+        \Segment\Tracks\TrackEntry\Audio\Channels:2
+        \Segment\Tracks\TrackEntry\Audio\SamplingFrequency:48000
+        \Segment\Tracks\TrackEntry\Audio\BitDepth:32
+      \Segment\Tracks\TrackEntry\CodecPrivate:<BINARY>
+  \Segment\Tags:<MASTER>
+    \Segment\Tags\Tag:<MASTER>
+      \Segment\Tags\Tag\Targets:<MASTER>
+      \Segment\Tags\Tag\+SimpleTag:<MASTER>
+        \Segment\Tags\Tag\+SimpleTag\TagName:ENCODER
+        \Segment\Tags\Tag\+SimpleTag\TagString:Lavf58.29.100
+    \Segment\Tags\Tag:<MASTER>
+      \Segment\Tags\Tag\Targets:<MASTER>
+        \Segment\Tags\Tag\Targets\TagTrackUID:1
+      \Segment\Tags\Tag\+SimpleTag:<MASTER>
+        \Segment\Tags\Tag\+SimpleTag\TagName:ALPHA_MODE
+        \Segment\Tags\Tag\+SimpleTag\TagString:1
+    \Segment\Tags\Tag:<MASTER>
+      \Segment\Tags\Tag\Targets:<MASTER>
+        \Segment\Tags\Tag\Targets\TagTrackUID:1
+      \Segment\Tags\Tag\+SimpleTag:<MASTER>
+        \Segment\Tags\Tag\+SimpleTag\TagName:DURATION
+        \Segment\Tags\Tag\+SimpleTag\TagString:00:00:06.415000000
+    \Segment\Tags\Tag:<MASTER>
+      \Segment\Tags\Tag\Targets:<MASTER>
+        \Segment\Tags\Tag\Targets\TagTrackUID:2
+      \Segment\Tags\Tag\+SimpleTag:<MASTER>
+        \Segment\Tags\Tag\+SimpleTag\TagName:DURATION
+        \Segment\Tags\Tag\+SimpleTag\TagString:00:00:06.419000000
+  \Segment\Cluster:<MASTER>
+    \Segment\Cluster\Timestamp:0
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+  \Segment\Cluster:<MASTER>
+    \Segment\Cluster\Timestamp:5040
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+    \Segment\Cluster\SimpleBlock:<BINARY>
+  \Segment\Cues:<MASTER>
+    \Segment\Cues\CuePoint:<MASTER>
+      \Segment\Cues\CuePoint\CueTime:0
+      \Segment\Cues\CuePoint\CueTrackPositions:<MASTER>
+        \Segment\Cues\CuePoint\CueTrackPositions\CueTrack:1
+        \Segment\Cues\CuePoint\CueTrackPositions\CueClusterPosition:695
+        \Segment\Cues\CuePoint\CueTrackPositions\CueRelativePosition:3
+*/

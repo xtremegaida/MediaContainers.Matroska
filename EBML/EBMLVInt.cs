@@ -1,22 +1,29 @@
 ﻿using System;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace EBML
 {
    public struct EBMLVInt
    {
+      public static readonly EBMLVInt Empty = new();
+      
       public readonly byte WidthBytes;
       public readonly ulong Value;
 
       public ulong ValueMask => (1UL << ((WidthBytes << 3) - WidthBytes)) - 1;
+      public ulong ValueWithMarker => Value | ((0x100UL >> WidthBytes) << ((WidthBytes - 1) << 3));
       public bool IsUnknownValue => Value == ValueMask;
       public bool IsMinWidth => WidthBytes == CalculateWidth(Value);
+      public bool IsValidValue => WidthBytes != 0;
+      public bool IsEmpty => WidthBytes == 0;
 
       public EBMLVInt(byte width, ulong value)
       {
          WidthBytes = width;
          Value = value;
-         if (width <= 0 || width > 8) { throw new ArgumentOutOfRangeException("width"); }
-         if ((value & ~ValueMask) != 0) { throw new ArgumentOutOfRangeException("value"); }
+         if (width <= 0 || width > 8) { throw new ArgumentOutOfRangeException(nameof(width)); }
+         if ((value & ~ValueMask) != 0) { throw new ArgumentOutOfRangeException(nameof(value)); }
       }
 
       public EBMLVInt(ulong value) : this(CalculateWidth(value), value) { }
@@ -33,36 +40,44 @@ namespace EBML
          return width;
       }
 
-      public static EBMLVInt CreateUnknown(byte width = 1)
+      public static EBMLVInt CreateUnknown(int width = 1)
       {
          if (width <= 0) { width = 1; }
          if (width > 8) { width = 8; }
          var mask = (1UL << ((width << 3) - width)) - 1;
-         return new EBMLVInt(width, mask);
+         return new EBMLVInt((byte)width, mask);
       }
 
-      public int Write(byte[] buffer, int offset)
+      public static EBMLVInt CreateWithMarker(ulong value)
       {
-         if (WidthBytes == 1)
+         if (value == 0) { return Empty; }
+         byte width = 1;
+         do
          {
-            buffer[offset] = (byte)(0x80 | Value);
-            return offset + 1;
+            var mask = (1UL << ((width << 3) + 1 - width)) - 1;
+            if ((value & ~mask) == 0) { break; }
          }
-         if (WidthBytes == 2)
-         {
-            buffer[offset] = (byte)(0x40 | (Value >> 8));
-            buffer[offset + 1] = (byte)(Value & 0xff);
-            return offset + 2;
-         }
-         buffer[offset++] = (byte)((0x100 >> WidthBytes) | (byte)(Value >> ((WidthBytes - 1) << 3)));
-         for (int i = 2; i <= WidthBytes; i++) { buffer[offset++] |= (byte)((Value >> ((WidthBytes - i) << 3)) & 0xff); }
-         return offset;
+         while (++width < 8);
+         var widthMask = (ulong)(-1L << ((width << 3) + 1 - width));
+         if ((value & widthMask) != 0) { throw new ArgumentException(nameof(value)); }
+         var markerBit = ((0x100UL >> width) << ((width - 1) << 3));
+         if ((value & markerBit) != markerBit) { throw new ArgumentException(nameof(value)); }
+         return new EBMLVInt(width, value & ~markerBit);
       }
 
-      public static EBMLVInt Read(byte[] buffer, ref int offset)
+      public async ValueTask Write(IDataQueueWriter buffer, CancellationToken cancellationToken = default)
       {
-         var prefix = buffer[offset++];
-         if (prefix == 0) { throw new NotSupportedException(); }
+         await buffer.WriteByteAsync((byte)((0x100 >> WidthBytes) | (byte)(Value >> ((WidthBytes - 1) << 3))), cancellationToken);
+         for (int i = 2; i <= WidthBytes; i++)
+         {
+            await buffer.WriteByteAsync((byte)((Value >> ((WidthBytes - i) << 3)) & 0xff), cancellationToken);
+         }
+      }
+
+      public static async ValueTask<EBMLVInt> Read(IDataQueueReader buffer, CancellationToken cancellationToken = default)
+      {
+         var prefix = await buffer.ReadByteAsync(cancellationToken);
+         if (prefix <= 0) { return Empty; }
          byte width = 1;
          if ((prefix & 0x80) == 0)
          {
@@ -74,9 +89,19 @@ namespace EBML
             }
          }
          if (width == 1) { return new EBMLVInt(1, (ulong)(prefix & 0x7F)); }
-         if (width == 2) { return new EBMLVInt(2, ((ulong)(prefix & 0x3F) << 8) | buffer[offset++]); }
+         if (width == 2)
+         {
+            var next = await buffer.ReadByteAsync(cancellationToken);
+            if (next < 0) { return Empty; }
+            return new EBMLVInt(2, ((ulong)(prefix & 0x3F) << 8) | (byte)next);
+         }
          ulong value = (ulong)(prefix & ((0x100 >> width) - 1));
-         for (int i = 1; i < width; i++) { value = (value << 8) | buffer[offset++]; }
+         for (int i = 1; i < width; i++)
+         {
+            var next = await buffer.ReadByteAsync(cancellationToken);
+            if (next < 0) { return Empty; }
+            value = (value << 8) | (byte)next;
+         }
          return new EBMLVInt(width, value);
       }
    }

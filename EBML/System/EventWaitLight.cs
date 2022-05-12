@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 
 namespace EBML
 {
+   [System.Diagnostics.DebuggerDisplay("TriggerState = {triggerState}")]
    public struct EventWaitLight
    {
       private SpinLock taskLock;
@@ -67,11 +68,7 @@ namespace EBML
          {
             if (withReEntrantSafety)
             {
-               Task.Run(() =>
-               {
-                  if (error != null) { source.TrySetException(error); }
-                  else { source.TrySetResult(); }
-               });
+               RunAsTask(source, error);
             }
             else
             {
@@ -79,6 +76,15 @@ namespace EBML
                else { source.TrySetResult(); }
             }
          }
+      }
+
+      private void RunAsTask(TaskCompletionSource source, Exception error)
+      {
+         _ = Task.Run(() =>
+         {
+            if (error != null) { source.TrySetException(error); }
+            else { source.TrySetResult(); }
+         });
       }
 
       public void Reset()

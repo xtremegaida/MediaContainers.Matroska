@@ -74,6 +74,8 @@ namespace EBML
          var length = buffer.Buffer.Length;
          if (length < memMinSize || length > memMaxSize) { return; }
          if ((BufferMemoryUsedBytes + length) > BufferMemoryMaxBytes) { return; }
+         buffer.ReadOffset = 0;
+         buffer.WriteOffset = 0;
          bucket.Enqueue(buffer);
          Interlocked.Add(ref memReserve, length);
          Interlocked.Add(ref memUsed, -length);
@@ -85,12 +87,24 @@ namespace EBML
          while (--itemCount >= 0 && bucket.TryDequeue(out var buffer))
          {
             var length = buffer.Buffer.Length;
-            if (length < minLength) { bucket.Enqueue(buffer); }
+            if (length < minLength)
+            {
+#if DEBUG
+               System.Diagnostics.Debug.Assert(buffer.WriteOffset == 0);
+               System.Diagnostics.Debug.Assert(buffer.ReadOffset == 0);
+               System.Diagnostics.Debug.Assert(buffer.References == 0);
+#endif
+               bucket.Enqueue(buffer);
+            }
             else
             {
                Interlocked.Add(ref memReserve, -length);
                Interlocked.Add(ref memUsed, length);
+#if DEBUG
+               System.Diagnostics.Debug.Assert(buffer.WriteOffset == 0);
+               System.Diagnostics.Debug.Assert(buffer.ReadOffset == 0);
                System.Diagnostics.Debug.Assert(buffer.References == 0);
+#endif
                buffer._ResetInternal();
                return buffer;
             }
@@ -119,6 +133,8 @@ namespace EBML
       private int refCount;
 
       public int References => refCount;
+      public Span<byte> ReadSpan => new Span<byte>(Buffer, ReadOffset, WriteOffset - ReadOffset);
+      public Span<byte> WriteSpan => new Span<byte>(Buffer, WriteOffset, Buffer.Length - WriteOffset);
 
       internal DataBuffer(DataBufferCache owner, byte[] buffer)
       {
