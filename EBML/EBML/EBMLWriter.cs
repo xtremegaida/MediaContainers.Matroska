@@ -50,6 +50,7 @@ namespace EBML
       }
 
       public EBMLElementDefiniton CurrentContainer => level?.Definition;
+      public bool CanSeek => stream?.CanSeek ?? false;
 
       public EBMLWriter(IDataQueueWriter writer, bool keepWriterOpen = false, DataBufferCache cache = null)
       {
@@ -178,6 +179,26 @@ namespace EBML
          }
       }
 
+      public async ValueTask WriteVoid(int bytes, CancellationToken cancellationToken = default)
+      {
+         if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
+
+         if (bytes < 0) { bytes = 0; }
+         var size = new EBMLVInt((ulong)bytes);
+         await EBMLElementDefiniton.Void.Id.Write(writer, cancellationToken);
+         await size.Write(writer, cancellationToken);
+         using (var tmp = cache.Pop(Math.Min(bytes, 4096)))
+         {
+            Array.Clear(tmp.Buffer, 0, tmp.Buffer.Length);
+            while (bytes > 0)
+            {
+               var canWrite = Math.Min(bytes, tmp.Buffer.Length);
+               await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, canWrite), cancellationToken);
+               bytes -= canWrite;
+            }
+         }
+      }
+
       public async ValueTask WriteBinary(EBMLElementDefiniton def, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
       {
          if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
@@ -261,7 +282,7 @@ namespace EBML
          }
       }
 
-      public async ValueTask WriteElement(EBMLElement element, int bufferSize = 256, CancellationToken cancellationToken = default)
+      public async ValueTask WriteElement(EBMLElement element, CancellationToken cancellationToken = default)
       {
          if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
          if (element == null) { throw new ArgumentNullException(nameof(element)); }
@@ -286,14 +307,22 @@ namespace EBML
                break;
             case EBMLElementType.Binary:
             case EBMLElementType.Unknown:
-               var bin = (EBMLBinaryElement)element;
-               if (bin.Reader == null) { await WriteBinary(element.Definition, bin.Value, cancellationToken); }
-               else { await WriteBinary(element.Definition, new DataQueueReadStream(bin.Reader), cancellationToken); }
+               if (element is EBMLVoidElement)
+               {
+                  await WriteVoid((int)element.DataSize.Value, cancellationToken);
+               }
+               else
+               {
+                  var bin = (EBMLBinaryElement)element;
+                  if (bin.Reader == null) { await WriteBinary(element.Definition, bin.Value, cancellationToken); }
+                  else { await WriteBinary(element.Definition, new DataQueueReadStream(bin.Reader), cancellationToken); }
+               }
                break;
             case EBMLElementType.Master:
                var master = (EBMLMasterElement)element;
-               await BeginMasterElement(master.Definition, bufferSize, cancellationToken);
-               foreach (var child in master.Children) { await WriteElement(child, bufferSize, cancellationToken); }
+               var size = Math.Max(Math.Min(master.EstimateSize() + 32, 32 << 20), 256);
+               await BeginMasterElement(master.Definition, size, cancellationToken);
+               foreach (var child in master.Children) { await WriteElement(child, cancellationToken); }
                await EndMasterElement(cancellationToken);
                break;
          }

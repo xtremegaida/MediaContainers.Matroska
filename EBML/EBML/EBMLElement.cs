@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace EBML
@@ -9,6 +10,7 @@ namespace EBML
    {
       public readonly EBMLElementDefiniton Definition;
       public readonly EBMLVInt DataSize;
+      public readonly long DataOffset;
       protected EBMLMasterElement parent;
 
       public virtual EBMLElementType ElementType => Definition.Type;
@@ -24,17 +26,20 @@ namespace EBML
       public virtual EBMLElement[] Children => Array.Empty<EBMLElement>();
       public virtual bool IsFullyRead => true;
 
-      protected EBMLElement(EBMLElementDefiniton def, EBMLVInt dataSize)
+      protected EBMLElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset)
       {
          Definition = def;
          DataSize = dataSize;
+         DataOffset = offset;
       }
 
       internal void SetParent(EBMLMasterElement parent) { this.parent = parent; }
 
       public override string ToString()
       {
-         return Definition.FullPath + ":" + StringValue;
+         return Definition.FullPath + ":" + StringValue +
+            (DataOffset < 0 ? " (?" : (" (0x" + Convert.ToString(DataOffset, 16))) + ":" +
+            (DataSize.IsUnknownValue ? "?" : ("0x" + Convert.ToString((long)DataSize.Value, 16))) + ")";
       }
    }
 
@@ -48,8 +53,8 @@ namespace EBML
       public override double DoubleValue => Value;
       public override string StringValue => Value.ToString();
 
-      public EBMLSignedIntegerElement(EBMLElementDefiniton def, EBMLVInt dataSize, long value)
-         : base(def, dataSize)
+      public EBMLSignedIntegerElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, long value)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.SignedInteger) { throw new ArgumentException("Type mismatch", nameof(def)); }
          if (dataSize.Value > 8) { throw new ArgumentOutOfRangeException(nameof(dataSize)); }
@@ -57,7 +62,7 @@ namespace EBML
       }
 
       public EBMLSignedIntegerElement(EBMLElementDefiniton def, long value)
-         : this(def, new EBMLVInt((ulong)EBMLWriter.CalculateWidth(value)), value) { }
+         : this(def, new EBMLVInt((ulong)EBMLWriter.CalculateWidth(value)), -1, value) { }
    }
 
    public sealed class EBMLUnsignedIntegerElement : EBMLElement
@@ -70,8 +75,8 @@ namespace EBML
       public override double DoubleValue => Value;
       public override string StringValue => Value.ToString();
 
-      public EBMLUnsignedIntegerElement(EBMLElementDefiniton def, EBMLVInt dataSize, ulong value)
-         : base(def, dataSize)
+      public EBMLUnsignedIntegerElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, ulong value)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.UnsignedInteger) { throw new ArgumentException("Type mismatch", nameof(def)); }
          if (dataSize.Value > 8) { throw new ArgumentOutOfRangeException(nameof(dataSize)); }
@@ -79,7 +84,7 @@ namespace EBML
       }
 
       public EBMLUnsignedIntegerElement(EBMLElementDefiniton def, ulong value)
-         : this(def, new EBMLVInt((ulong)EBMLWriter.CalculateWidth(value)), value) { }
+         : this(def, new EBMLVInt((ulong)EBMLWriter.CalculateWidth(value)), -1, value) { }
    }
 
    public sealed class EBMLFloatElement : EBMLElement
@@ -93,26 +98,26 @@ namespace EBML
       public override double DoubleValue => Value64;
       public override string StringValue => Value64.ToString();
 
-      public EBMLFloatElement(EBMLElementDefiniton def, EBMLVInt dataSize, double value)
-         : base(def, dataSize)
+      public EBMLFloatElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, double value)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.Float) { throw new ArgumentException("Type mismatch", nameof(def)); }
          if (dataSize.Value != 0 && dataSize.Value != 8) { throw new ArgumentOutOfRangeException(nameof(dataSize)); }
          Value64 = value; Value32 = (float)value;
       }
 
-      public EBMLFloatElement(EBMLElementDefiniton def, EBMLVInt dataSize, float value)
-         : base(def, dataSize)
+      public EBMLFloatElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, float value)
+         : base(def, dataSize, offset)
       {
          if (dataSize.Value != 0 && dataSize.Value != 4) { throw new ArgumentOutOfRangeException(nameof(dataSize)); }
          Value64 = value; Value32 = value;
       }
 
       public EBMLFloatElement(EBMLElementDefiniton def, double value)
-         : this(def, new EBMLVInt(8), value) { }
+         : this(def, new EBMLVInt(8), -1, value) { }
 
       public EBMLFloatElement(EBMLElementDefiniton def, float value)
-         : this(def, new EBMLVInt(4), value) { }
+         : this(def, new EBMLVInt(4), -1, value) { }
    }
 
    public sealed class EBMLStringElement : EBMLElement
@@ -127,15 +132,15 @@ namespace EBML
       public override string StringValue => Value;
       public override DateTime? DateValue { get { if (DateTime.TryParse(Value, out var i)) { return i; } return null; } }
 
-      public EBMLStringElement(EBMLElementDefiniton def, EBMLVInt dataSize, string value)
-         : base(def, dataSize)
+      public EBMLStringElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, string value)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.String && def.Type != EBMLElementType.UTF8) { throw new ArgumentException("Type mismatch", nameof(def)); }
          Value = value;
       }
 
       public EBMLStringElement(EBMLElementDefiniton def, string str)
-         : this(def, EBMLVInt.CreateUnknown(1), str) { }
+         : this(def, new EBMLVInt((ulong)str.Length), -1, str) { }
    }
 
    public sealed class EBMLDateElement : EBMLElement
@@ -147,8 +152,8 @@ namespace EBML
       public override string StringValue => Value.ToString();
       public override DateTime? DateValue => Value;
 
-      public EBMLDateElement(EBMLElementDefiniton def, EBMLVInt dataSize, DateTime value)
-         : base(def, dataSize)
+      public EBMLDateElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, DateTime value)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.Date) { throw new ArgumentException("Type mismatch", nameof(def)); }
          if (dataSize.Value != 8 && (dataSize.Value != 0 || value != Epoch)) { throw new ArgumentOutOfRangeException(nameof(dataSize)); }
@@ -156,10 +161,15 @@ namespace EBML
       }
 
       public EBMLDateElement(EBMLElementDefiniton def, DateTime value)
-         : this(def, new EBMLVInt(8), value) { }
+         : this(def, new EBMLVInt(8), -1, value) { }
    }
 
-   public sealed class EBMLBinaryElement : EBMLElement
+   public interface IEBMLSkippableElement
+   {
+      ValueTask SkipToEnd(CancellationToken cancellationToken);
+   }
+
+   public sealed class EBMLBinaryElement : EBMLElement, IEBMLSkippableElement
    {
       public readonly ReadOnlyMemory<byte> Value;
 
@@ -169,8 +179,8 @@ namespace EBML
       public override string StringValue => "<BINARY>";
       public override bool IsFullyRead => reader?.IsReadClosed ?? true;
 
-      public EBMLBinaryElement(EBMLElementDefiniton def, EBMLVInt dataSize, ReadOnlyMemory<byte> value)
-         : base(def, dataSize)
+      public EBMLBinaryElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, ReadOnlyMemory<byte> value)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.Binary && def.Type != EBMLElementType.Unknown) { throw new ArgumentException("Type mismatch", nameof(def)); }
          if ((int)dataSize.Value > value.Length) { throw new ArgumentOutOfRangeException(nameof(dataSize)); }
@@ -178,37 +188,83 @@ namespace EBML
          Value = value;
       }
 
-      public EBMLBinaryElement(EBMLElementDefiniton def, EBMLVInt dataSize, IDataQueueReader reader)
-         : base(def, dataSize)
+      public EBMLBinaryElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, IDataQueueReader reader)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.Binary) { throw new ArgumentException("Type mismatch", nameof(def)); }
          this.reader = new DataQueueLimitedReader(reader, (long)dataSize.Value, true);
       }
 
       public EBMLBinaryElement(EBMLElementDefiniton def, ReadOnlyMemory<byte> value)
-         : this(def, new EBMLVInt((ulong)value.Length), value) { }
+         : this(def, new EBMLVInt((ulong)value.Length), -1, value) { }
+
+      public async ValueTask SkipToEnd(CancellationToken cancellationToken = default)
+      {
+         if (Reader == null || Reader.IsReadClosed) { return; }
+         using (Reader) { await Reader.ReadAsync((int)Reader.UnreadLength, cancellationToken); }
+      }
+   }
+
+   public sealed class EBMLVoidElement : EBMLElement, IEBMLSkippableElement
+   {
+      private readonly IDataQueueReader reader;
+
+      public IDataQueueReader Reader => reader;
+      public override string StringValue => "<VOID>";
+      public override bool IsFullyRead => reader?.IsReadClosed ?? true;
+
+      public EBMLVoidElement(EBMLVInt dataSize, long offset)
+         : base(EBMLElementDefiniton.Void, dataSize, offset) { }
+
+      public EBMLVoidElement(EBMLVInt dataSize, long offset, IDataQueueReader reader)
+         : base(EBMLElementDefiniton.Void, dataSize, offset)
+      {
+         this.reader = new DataQueueLimitedReader(reader, (long)dataSize.Value, true);
+      }
+
+      public EBMLVoidElement(int size) : this(new EBMLVInt((ulong)size), -1) { }
+
+      public async ValueTask SkipToEnd(CancellationToken cancellationToken = default)
+      {
+         if (Reader == null || Reader.IsReadClosed) { return; }
+         using (Reader) { await Reader.ReadAsync((int)Reader.UnreadLength, cancellationToken); }
+      }
    }
 
    public sealed class EBMLMasterElement : EBMLElement
    {
       public override string StringValue => "<MASTER>";
 
+      private readonly EBMLReader ebml;
       private readonly IDataQueueReader reader;
       private readonly List<EBMLElement> children = new();
       private EBMLElement[] childArray;
 
       public IDataQueueReader Reader => reader;
-      public override bool IsFullyRead => reader.IsReadClosed;
+      public override bool IsFullyRead => reader?.IsReadClosed ?? true;
       public override EBMLElement[] Children => childArray ??= children.ToArray();
 
       public EBMLMasterElement(EBMLElementDefiniton def)
-         : base(def, EBMLVInt.CreateUnknown(1)) { }
+         : base(def, EBMLVInt.CreateUnknown(1), -1) { }
 
-      public EBMLMasterElement(EBMLElementDefiniton def, EBMLVInt dataSize, IDataQueueReader reader)
-         : base(def, dataSize)
+      public EBMLMasterElement(EBMLElementDefiniton def, EBMLVInt dataSize, long offset, IDataQueueReader reader, EBMLReader ebml)
+         : base(def, dataSize, offset)
       {
          if (def.Type != EBMLElementType.Master) { throw new ArgumentException("Type mismatch", nameof(def)); }
          this.reader = new DataQueueLimitedReader(reader, dataSize.IsUnknownValue ? long.MaxValue : (long)dataSize.Value, true);
+         this.ebml = ebml;
+      }
+
+      public int EstimateSize()
+      {
+         int size = 0;
+         foreach (var child in Children)
+         {
+            if (child is EBMLMasterElement m) { size += m.EstimateSize(); }
+            else if (!child.DataSize.IsUnknownValue) { size += (int)child.DataSize.Value; }
+            size += child.Definition.Id.WidthBytes + child.DataSize.WidthBytes;
+         }
+         return size;
       }
 
       public void AddChild(EBMLElement element)
@@ -216,6 +272,25 @@ namespace EBML
          childArray = null;
          element.SetParent(this);
          children.Add(element);
+      }
+
+      public bool IsParentOf(EBMLElement element)
+      {
+         do
+         {
+            if (element == null) { return false; }
+            element = element.Parent;
+            if (element == this) { return true; }
+         }
+         while (true);
+      }
+
+      public async ValueTask ReadToEnd(CancellationToken cancellationToken = default)
+      {
+         if (ebml == null) { return; }
+         if (IsFullyRead) { return; }
+         if (ebml.CurrentContainer != this && !IsParentOf(ebml.CurrentContainer)) { throw new InvalidOperationException(); }
+         while (!IsFullyRead) { if ((await ebml.ReadNextElement(cancellationToken)) == null) { break; } }
       }
 
       public string ToFullString(string prefix = null, string indent = "  ")

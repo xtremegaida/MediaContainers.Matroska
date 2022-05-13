@@ -12,6 +12,8 @@ namespace EBML
       private readonly Dictionary<ulong, EBMLElementDefiniton> elementTypes = new Dictionary<ulong, EBMLElementDefiniton>();
       private readonly DataBufferCache cache;
       private readonly IDataQueueReader reader;
+      private readonly Stream stream;
+      private readonly long startOffset;
       private readonly bool keepReaderOpen;
       private readonly byte[] readTmp = new byte[8];
       private readonly List<EBMLMasterElement> masterBlocks = new();
@@ -21,6 +23,9 @@ namespace EBML
       private EBMLElement lastElement;
 
       public EBMLMasterElement CurrentContainer => level;
+      public EBMLElement CurrentElement => lastElement;
+      public long CurrentReaderOffset => reader.TotalBytesRead + startOffset;
+      public bool CanSeek => stream?.CanSeek ?? false;
 
       public int MaxInlineBinarySize
       {
@@ -39,11 +44,19 @@ namespace EBML
       public EBMLReader(Stream stream, bool keepStreamOpen = false, DataBufferCache cache = null)
          : this(new DataQueueStreamReader(stream, keepStreamOpen), false, cache)
       {
+         this.stream = stream;
+         if (stream.CanSeek) { startOffset = stream.Position; }
       }
 
       public void AddElementDefinition(EBMLElementDefiniton def)
       {
          elementTypes.Add(def.Id.ValueWithMarker, def);
+      }
+
+      public EBMLElementDefiniton GetElementDefinition(ulong id)
+      {
+         if (elementTypes.TryGetValue(id, out var def)) { return def; }
+         return null;
       }
 
       private async ValueTask<EBMLSignedIntegerElement> ReadSignedInteger(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
@@ -52,6 +65,7 @@ namespace EBML
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
          if (size.IsUnknownValue || size.Value > 8) { return null; }
+         var offset = CurrentReaderOffset;
          long value = 0;
          for (int i = (int)size.Value; i > 0; i--)
          {
@@ -61,7 +75,7 @@ namespace EBML
          }
          var shift = 64 - ((int)size.Value << 3);
          value = (value << shift) >> shift;
-         return new EBMLSignedIntegerElement(def, size, value);
+         return new EBMLSignedIntegerElement(def, size, offset, value);
       }
 
       private async ValueTask<EBMLUnsignedIntegerElement> ReadUnsignedInteger(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
@@ -70,6 +84,7 @@ namespace EBML
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
          if (size.IsUnknownValue || size.Value > 8) { return null; }
+         var offset = CurrentReaderOffset;
          ulong value = 0;
          for (int i = (int)size.Value; i > 0; i--)
          {
@@ -77,7 +92,7 @@ namespace EBML
             if (read < 0) { return null; }
             value = (value << 8) | (byte)read;
          }
-         return new EBMLUnsignedIntegerElement(def, size, value);
+         return new EBMLUnsignedIntegerElement(def, size, offset, value);
       }
 
       private async ValueTask<EBMLFloatElement> ReadFloat(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
@@ -86,17 +101,18 @@ namespace EBML
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
          if (size.IsUnknownValue) { return null; }
+         var offset = CurrentReaderOffset;
          if (size.Value == 8)
          {
             await reader.ReadAsync(new Memory<byte>(readTmp, 0, 8), true, cancellationToken);
             var value = System.Buffers.Binary.BinaryPrimitives.ReadDoubleBigEndian(readTmp);
-            return new EBMLFloatElement(def, size, value);
+            return new EBMLFloatElement(def, size, offset, value);
          }
          if (size.Value == 4)
          {
             await reader.ReadAsync(new Memory<byte>(readTmp, 0, 4), true, cancellationToken);
             var value = System.Buffers.Binary.BinaryPrimitives.ReadSingleBigEndian(readTmp);
-            return new EBMLFloatElement(def, size, value);
+            return new EBMLFloatElement(def, size, offset, value);
          }
          return null;
       }
@@ -107,13 +123,14 @@ namespace EBML
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
          if (size.IsUnknownValue) { return null; }
+         var offset = CurrentReaderOffset;
          int readBytes = (int)size.Value;
-         if (readBytes == 0) { return new EBMLStringElement(def, size, string.Empty); }
+         if (readBytes == 0) { return new EBMLStringElement(def, size, offset, string.Empty); }
          using (var buffer = cache.Pop(readBytes))
          {
             readBytes = await reader.ReadAsync(new Memory<byte>(buffer.Buffer, 0, readBytes), true, cancellationToken);
             var str = (def.Type == EBMLElementType.UTF8 ? Encoding.UTF8 : Encoding.ASCII).GetString(buffer.Buffer, 0, readBytes);
-            return new EBMLStringElement(def, size, str);
+            return new EBMLStringElement(def, size, offset, str);
          }
       }
 
@@ -123,12 +140,13 @@ namespace EBML
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
          if (size.IsUnknownValue) { return null; }
-         if (size.Value == 0) { return new EBMLDateElement(def, size, EBMLDateElement.Epoch); }
+         var offset = CurrentReaderOffset;
+         if (size.Value == 0) { return new EBMLDateElement(def, size, offset, EBMLDateElement.Epoch); }
          if (size.Value == 8)
          {
             await reader.ReadAsync(new Memory<byte>(readTmp, 0, 8), true, cancellationToken);
             var value = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(readTmp);
-            return new EBMLDateElement(def, size, new DateTime(EBMLDateElement.Epoch.Ticks + (value / 100), DateTimeKind.Utc));
+            return new EBMLDateElement(def, size, offset, new DateTime(EBMLDateElement.Epoch.Ticks + (value / 100), DateTimeKind.Utc));
          }
          return null;
       }
@@ -139,14 +157,31 @@ namespace EBML
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
          if (size.IsUnknownValue) { return null; }
-         if (size.Value == 0) { return new EBMLBinaryElement(def, size, new ReadOnlyMemory<byte>()); }
+         var offset = CurrentReaderOffset;
+         if (size.Value == 0) { return new EBMLBinaryElement(def, size, offset, new ReadOnlyMemory<byte>()); }
          if (size.Value <= (ulong)maxInlineBinarySize)
          {
             var bytes = new byte[(int)size.Value];
             await reader.ReadAsync(bytes, true, cancellationToken);
-            return new EBMLBinaryElement(def, size, bytes);
+            return new EBMLBinaryElement(def, size, offset, bytes);
          }
-         return new EBMLBinaryElement(def, size, reader);
+         return new EBMLBinaryElement(def, size, offset, reader);
+      }
+
+      private async ValueTask<EBMLVoidElement> ReadVoid(CancellationToken cancellationToken = default)
+      {
+         var reader = level?.Reader ?? this.reader;
+         var size = await EBMLVInt.Read(reader, cancellationToken);
+         if (size.IsEmpty) { return null; }
+         if (size.IsUnknownValue) { return null; }
+         var offset = CurrentReaderOffset;
+         if (size.Value == 0) { return new EBMLVoidElement(size, offset); }
+         if (size.Value <= (ulong)maxInlineBinarySize)
+         {
+            await reader.ReadAsync((int)size.Value, cancellationToken);
+            return new EBMLVoidElement(size, offset);
+         }
+         return new EBMLVoidElement(size, offset, reader);
       }
 
       private async ValueTask<EBMLMasterElement> ReadMaster(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
@@ -154,14 +189,14 @@ namespace EBML
          var reader = level?.Reader ?? this.reader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return null; }
-         return new EBMLMasterElement(def, size, reader);
+         return new EBMLMasterElement(def, size, CurrentReaderOffset, reader, this);
       }
 
       public async ValueTask<EBMLElement> ReadNextElement(CancellationToken cancellationToken = default)
       {
-         if (lastElement != null && !lastElement.IsFullyRead && lastElement is EBMLBinaryElement b)
+         if (lastElement != null && !lastElement.IsFullyRead && lastElement is IEBMLSkippableElement skip)
          {
-            using (b.Reader) { await b.Reader.ReadAsync((int)b.Reader.UnreadLength, cancellationToken); }
+            await skip.SkipToEnd(cancellationToken);
          }
          while (true)
          {
@@ -172,7 +207,8 @@ namespace EBML
             if (def != null)
             {
                while (level != null && level.DataSize.IsUnknownValue && !def.IsDirectChildOf(level.Definition)) { PopLevel(); }
-               switch (def.Type)
+               if (def == EBMLElementDefiniton.Void) { lastElement = await ReadVoid(cancellationToken); }
+               else switch (def.Type)
                {
                   case EBMLElementType.SignedInteger: lastElement = await ReadSignedInteger(def, cancellationToken); break;
                   case EBMLElementType.UnsignedInteger: lastElement = await ReadUnsignedInteger(def, cancellationToken); break;

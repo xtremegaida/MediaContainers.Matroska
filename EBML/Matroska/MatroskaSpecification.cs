@@ -1,6 +1,6 @@
-﻿namespace EBML
+﻿namespace EBML.Matroska
 {
-   public static class MatroskaElementDefinition
+   public static class MatroskaSpecification
    {
       public static readonly EBMLElementDefiniton Segment = new EBMLElementDefiniton(0x18538067, EBMLElementType.Master, @"\Segment", allowUnknownSize: true);
       public static readonly EBMLElementDefiniton SeekHead = new EBMLElementDefiniton(0x114D9B74, EBMLElementType.Master, @"\Segment\SeekHead");

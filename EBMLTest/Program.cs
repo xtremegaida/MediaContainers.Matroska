@@ -2,6 +2,7 @@
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Running;
 using EBML;
+using EBML.Matroska;
 using System;
 using System.Collections.Concurrent;
 using System.IO;
@@ -23,13 +24,16 @@ namespace EBMLTest
 
       static async Task TestFunc()
       {
-         MatroskaElementDefinition.RegisterFormat();
-         using (var buffer = new MemoryStream(File.ReadAllBytes("..\\..\\..\\a.webm")))
-         using (var doc = await EBMLDocumentReader.Read(buffer))
+         using (var buffer = new BufferedStream(File.OpenRead("..\\..\\..\\a.webm")))
+         using (var doc = await MatroskaReader.Read(buffer))
          {
-            Console.WriteLine(doc.Header.ToElement().ToFullString());
-            while (!doc.Body.IsFullyRead) { await doc.ReadNextElement(); }
-            Console.WriteLine(doc.Body.ToFullString());
+            Console.WriteLine(doc.Document.Header.OriginalElement.ToFullString());
+            await doc.Document.Body.ReadToEnd();
+            doc.ScanTrackInfo();
+            Console.WriteLine(doc.Document.Body.ToFullString());
+            Console.WriteLine(doc.SeekHead.ToString());
+            Console.WriteLine(doc.Tracks.ToElement().ToFullString());
+            Console.WriteLine(doc.Cues.ToElement().ToFullString());
          }
       }
    }

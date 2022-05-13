@@ -8,6 +8,7 @@ namespace EBML
 {
    public class EBMLHeader
    {
+      public EBMLMasterElement OriginalElement { get; private set; }
       public int EBMLVersion { get; set; } = 1;
       public int EBMLReadVersion { get; set; } = 1;
       public int EBMLMaxIDLength { get; set; } = 4;
@@ -24,6 +25,7 @@ namespace EBML
          if (element == null) { throw new ArgumentNullException(nameof(element)); }
          if (element.Definition != EBMLElementDefiniton.EBML) { throw new ArgumentException("Element must be an EBML header section", nameof(element)); }
          if (!element.IsFullyRead) { throw new ArgumentException("Element must be fully read", nameof(element)); }
+         OriginalElement = element;
          foreach (var item in element.Children)
          {
             if (item.Definition == EBMLElementDefiniton.EBMLVersion) { EBMLVersion = (int)item.IntValue; }
