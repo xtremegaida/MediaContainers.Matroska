@@ -45,7 +45,7 @@ namespace EBML
          Id = EBMLVInt.CreateWithMarker(id);
          Type = type;
          FullPath = fullPath;
-         var components = fullPath.Split('\\');
+         var components = fullPath.Split('\\', System.StringSplitOptions.RemoveEmptyEntries);
          Name = components[^1];
          if (Name.StartsWith('+')) { Name = Name.Substring(1); }
          if (!fullPath.StartsWith('\\') && components.Length == 1) { IsGlobal = true; Path = "\\"; }

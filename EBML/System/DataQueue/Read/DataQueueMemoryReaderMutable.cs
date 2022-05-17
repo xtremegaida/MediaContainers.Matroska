@@ -5,19 +5,30 @@ using System.Threading.Tasks;
 
 namespace EBML
 {
-   public class DataQueueMemoryReader : IDataQueueReader
+   public class DataQueueMemoryReaderMutable : IDataQueueReader
    {
-      private readonly ReadOnlyMemory<byte> memory;
+      private ReadOnlyMemory<byte> memory;
       private int totalBytesRead;
       private volatile bool disposed;
 
       public long UnreadLength => memory.Length - totalBytesRead;
       public bool IsReadClosed => disposed || totalBytesRead >= memory.Length;
       public long TotalBytesRead => totalBytesRead;
+      public ReadOnlyMemory<byte> Memory => memory;
 
-      public DataQueueMemoryReader(ReadOnlyMemory<byte> memory)
+      public DataQueueMemoryReaderMutable() { }
+
+      public void SetBuffer(ReadOnlyMemory<byte> memory)
       {
+         if (disposed) { throw new ObjectDisposedException(nameof(DataQueueMemoryReaderMutable)); }
          this.memory = memory;
+         totalBytesRead = 0;
+      }
+
+      public void SetReadOffset(int offset)
+      {
+         if (disposed) { throw new ObjectDisposedException(nameof(DataQueueMemoryReaderMutable)); }
+         totalBytesRead = offset;
       }
 
       public ValueTask<int> ReadAsync(Memory<byte> buffer, bool waitUntilFull = false, CancellationToken cancellationToken = default)

@@ -5,12 +5,12 @@ using System.Threading.Tasks;
 
 namespace EBML
 {
-   public class DataQueueLimitedReader : IDataQueueReader
+   public class DataQueueLimitedReaderMutable : IDataQueueReader
    {
-      private readonly IDataQueueReader reader;
-      private readonly bool keepStreamOpen;
-      private readonly long maxReadBytes;
+      private IDataQueueReader reader;
+      private long maxReadBytes;
       private long totalBytesRead;
+      private bool isUnknownSize;
       private volatile bool disposed;
 
       public long UnreadLength
@@ -18,28 +18,36 @@ namespace EBML
          get
          {
             var canRead = reader.UnreadLength;
-            var maxRead = maxReadBytes - totalBytesRead;
-            if (maxRead < canRead) { canRead = maxRead; }
+            if (!isUnknownSize)
+            {
+               var maxRead = maxReadBytes - totalBytesRead;
+               if (maxRead < canRead) { canRead = maxRead; }
+            }
             return canRead;
          }
       }
 
-      public long CanReadLength => maxReadBytes - totalBytesRead;
-      public bool IsReadClosed => disposed || (totalBytesRead >= maxReadBytes);
+      public long CanReadLength => isUnknownSize ? 0 : (maxReadBytes - totalBytesRead);
+      public bool IsReadClosed => disposed || (!isUnknownSize && totalBytesRead >= maxReadBytes);
       public long TotalBytesRead => totalBytesRead;
+      public bool IsUnknownSize => isUnknownSize;
 
-      public DataQueueLimitedReader(IDataQueueReader reader, long maxReadBytes, bool keepStreamOpen = false)
+      public DataQueueLimitedReaderMutable() { }
+
+      public void SetReadSource(IDataQueueReader reader, long maxReadBytes)
       {
-         if (maxReadBytes < 0) { throw new ArgumentOutOfRangeException(nameof(maxReadBytes)); }
+         if (disposed) { throw new ObjectDisposedException(nameof(DataQueueLimitedReaderMutable)); }
+         isUnknownSize = false;
+         if (maxReadBytes < 0) { isUnknownSize = true; maxReadBytes = 0; }
          this.reader = reader;
-         this.keepStreamOpen = keepStreamOpen;
          this.maxReadBytes = maxReadBytes;
+         totalBytesRead = 0;
       }
 
       public async ValueTask<int> ReadAsync(Memory<byte> buffer, bool waitUntilFull = false, CancellationToken cancellationToken = default)
       {
          if (disposed) { return 0; }
-         if (maxReadBytes >= 0)
+         if (!isUnknownSize)
          {
             var canRead = maxReadBytes - totalBytesRead;
             if (canRead < buffer.Length) { buffer = buffer.Slice(0, (int)canRead); }
@@ -52,7 +60,7 @@ namespace EBML
       public async ValueTask<int> ReadAsync(int skipBytes, CancellationToken cancellationToken = default)
       {
          if (disposed) { return 0; }
-         if (maxReadBytes >= 0)
+         if (!isUnknownSize)
          {
             var canRead = maxReadBytes - totalBytesRead;
             if (canRead < skipBytes) { skipBytes = (int)canRead; }
@@ -65,7 +73,7 @@ namespace EBML
 
       public async ValueTask<int> ReadByteAsync(CancellationToken cancellationToken = default)
       {
-         if (disposed || (maxReadBytes >= 0 && totalBytesRead >= maxReadBytes)) { return -1; }
+         if (disposed || (!isUnknownSize && totalBytesRead >= maxReadBytes)) { return -1; }
          var read = await reader.ReadByteAsync(cancellationToken);
          Interlocked.Increment(ref totalBytesRead);
          return read;
@@ -73,9 +81,7 @@ namespace EBML
 
       public void Dispose()
       {
-         if (disposed) { return; }
          disposed = true;
-         if (!keepStreamOpen) { reader.Dispose(); }
       }
    }
 }

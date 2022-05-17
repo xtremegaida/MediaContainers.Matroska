@@ -7,12 +7,13 @@ namespace EBML
    public struct EBMLVInt
    {
       public static readonly EBMLVInt Empty = new();
-      
+
       public readonly byte WidthBytes;
       public readonly ulong Value;
 
       public ulong ValueMask => (1UL << ((WidthBytes << 3) - WidthBytes)) - 1;
       public ulong ValueWithMarker => Value | ((0x100UL >> WidthBytes) << ((WidthBytes - 1) << 3));
+      public long SignedValue { get { var shift = 64 - ((WidthBytes << 3) - WidthBytes); return (long)(Value << shift) >> shift; } }
       public bool IsUnknownValue => Value == ValueMask;
       public bool IsMinWidth => WidthBytes == CalculateWidth(Value);
       public bool IsValidValue => WidthBytes != 0;

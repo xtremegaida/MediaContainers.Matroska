@@ -20,11 +20,6 @@ namespace EBML
          Body = body;
       }
 
-      public ValueTask<EBMLElement> ReadNextElement(CancellationToken cancellationToken = default)
-      {
-         return reader.ReadNextElement(cancellationToken);
-      }
-
       public bool CanBeReadBy(EBMLDocType type)
       {
          return type.CanReadDocument(Header);
