@@ -8,12 +8,17 @@ namespace EBML
    {
       public static readonly DataBufferCache DefaultCache = new DataBufferCache();
 
-      private readonly ConcurrentQueue<DataBuffer> bucket = new ConcurrentQueue<DataBuffer>();
+      private readonly ConcurrentQueue<DataBuffer> bucket0 = new();
+      private readonly ConcurrentQueue<DataBuffer> bucket1 = new();
+      private readonly ConcurrentQueue<DataBuffer> bucket2 = new();
+      private readonly ConcurrentQueue<DataBuffer>[] buckets;
       private long memReserve;
       private long memReserveMax = 32 << 20; // 32MiB
       private long memUsed;
       private int memMinSize = 256;
       private int memMaxSize = 262144;
+      private int bucketMaxSize0 = 1024;
+      private int bucketMaxSize1 = 32768;
 
       public int BufferMinSize
       {
@@ -24,11 +29,15 @@ namespace EBML
             if (size <= 16) { size = 16; }
             if (size > 65536) { size = 65536; }
             memMinSize = size;
-            var itemCount = bucket.Count;
-            while (--itemCount >= 0 && bucket.TryDequeue(out var buffer))
+            for (int i = buckets.Length - 1; i >= 0; i--)
             {
-               if (buffer.Buffer.Length >= size) { bucket.Enqueue(buffer); }
-               else { Interlocked.Add(ref memReserve, -buffer.Buffer.Length); }
+               var bucket = buckets[i];
+               var itemCount = bucket.Count;
+               while (--itemCount >= 0 && bucket.TryDequeue(out var buffer))
+               {
+                  if (buffer.Buffer.Length >= size) { bucket.Enqueue(buffer); }
+                  else { Interlocked.Add(ref memReserve, -buffer.Buffer.Length); }
+               }
             }
          }
       }
@@ -41,11 +50,15 @@ namespace EBML
             var size = value;
             if (size <= 256) { size = 256; }
             memMaxSize = size;
-            var itemCount = bucket.Count;
-            while (--itemCount >= 0 && bucket.TryDequeue(out var buffer))
+            for (int i = buckets.Length - 1; i >= 0; i--)
             {
-               if (buffer.Buffer.Length <= size) { bucket.Enqueue(buffer); }
-               else { Interlocked.Add(ref memReserve, -buffer.Buffer.Length); }
+               var bucket = buckets[i];
+               var itemCount = bucket.Count;
+               while (--itemCount >= 0 && bucket.TryDequeue(out var buffer))
+               {
+                  if (buffer.Buffer.Length <= size) { bucket.Enqueue(buffer); }
+                  else { Interlocked.Add(ref memReserve, -buffer.Buffer.Length); }
+               }
             }
          }
       }
@@ -60,12 +73,20 @@ namespace EBML
             Interlocked.Exchange(ref memReserveMax, value);
             if (BufferMemoryUsedBytes > BufferMemoryMaxBytes)
             {
-               while (BufferMemoryUsedBytes > BufferMemoryMaxBytes && bucket.TryDequeue(out var buffer))
+               for (int i = buckets.Length - 1; i >= 0 && BufferMemoryUsedBytes > BufferMemoryMaxBytes; i--)
                {
-                  Interlocked.Add(ref memReserve, -buffer.Buffer.Length);
+                  while (BufferMemoryUsedBytes > BufferMemoryMaxBytes && buckets[i].TryDequeue(out var buffer))
+                  {
+                     Interlocked.Add(ref memReserve, -buffer.Buffer.Length);
+                  }
                }
             }
          }
+      }
+
+      public DataBufferCache()
+      {
+         buckets = new ConcurrentQueue<DataBuffer>[] { bucket0, bucket1, bucket2 };
       }
 
       internal void _PushInternal(DataBuffer buffer)
@@ -76,13 +97,16 @@ namespace EBML
          if ((BufferMemoryUsedBytes + length) > BufferMemoryMaxBytes) { return; }
          buffer.ReadOffset = 0;
          buffer.WriteOffset = 0;
-         bucket.Enqueue(buffer);
+         if (length > bucketMaxSize1) { bucket2.Enqueue(buffer); }
+         else if (length > bucketMaxSize0) { bucket1.Enqueue(buffer); }
+         else { bucket0.Enqueue(buffer); }
          Interlocked.Add(ref memReserve, length);
          Interlocked.Add(ref memUsed, -length);
       }
 
       public DataBuffer Pop(int minLength)
       {
+         var bucket = minLength >= bucketMaxSize1 ? bucket2 : minLength >= bucketMaxSize0 ? bucket1 : bucket0;
          var itemCount = bucket.Count;
          while (--itemCount >= 0 && bucket.TryDequeue(out var buffer))
          {
@@ -116,9 +140,13 @@ namespace EBML
 
       public void Clear()
       {
-         while (bucket.TryDequeue(out var buffer))
+         for (int i = buckets.Length - 1; i >= 0; i--)
          {
-            Interlocked.Add(ref memReserve, -buffer.Buffer.Length);
+            var bucket = buckets[i];
+            while (bucket.TryDequeue(out var buffer))
+            {
+               Interlocked.Add(ref memReserve, -buffer.Buffer.Length);
+            }
          }
       }
    }
@@ -133,12 +161,15 @@ namespace EBML
       private int refCount;
 
       public int References => refCount;
+      public int UnreadSize => WriteOffset - ReadOffset;
+      public int SpaceLeft => Buffer.Length - WriteOffset;
       public Span<byte> ReadSpan => new Span<byte>(Buffer, ReadOffset, WriteOffset - ReadOffset);
       public Span<byte> WriteSpan => new Span<byte>(Buffer, WriteOffset, Buffer.Length - WriteOffset);
+      public ReadOnlyMemory<byte> ReadMemory => new ReadOnlyMemory<byte>(Buffer, ReadOffset, WriteOffset - ReadOffset);
+      public Memory<byte> WriteMemory => new Memory<byte>(Buffer, WriteOffset, Buffer.Length - WriteOffset);
 
-      internal DataBuffer(DataBufferCache owner, byte[] buffer)
+      public DataBuffer(DataBufferCache owner, byte[] buffer)
       {
-         if (buffer == null) { throw new ArgumentNullException("buffer"); }
          Owner = owner;
          Buffer = buffer;
          refCount = 1;
@@ -162,7 +193,7 @@ namespace EBML
          {
             ReadOffset = 0;
             WriteOffset = 0;
-            Owner._PushInternal(this);
+            Owner?._PushInternal(this);
          }
       }
    }

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,6 +29,41 @@ namespace EBML.Matroska
          public byte[] ChapterTranslateEditionUID { get; set; }
          public int ChapterTranslateCodec { get; set; }
          public byte[] ChapterTranslateID { get; set; }
+      }
+
+      public void CopyTo(MatroskaInfo info, bool shallow = false, bool copyAppName = false)
+      {
+         info.SegmentUID = SegmentUID;
+         info.SegmentFilename = SegmentFilename;
+         info.PrevUID = PrevUID;
+         info.PrevFilename = PrevFilename;
+         info.NextUID = NextUID;
+         info.NextFilename = NextFilename;
+         info.SegmentFamily = SegmentFamily;
+         if (shallow) { info.ChapterTranslateEntries = ChapterTranslateEntries; }
+         else
+         {
+            info.ChapterTranslateEntries = null;
+            if (ChapterTranslateEntries != null)
+            {
+               info.ChapterTranslateEntries = ChapterTranslateEntries.Select(x => new ChapterTranslate()
+               {
+                  ChapterTranslateEditionUID = x.ChapterTranslateEditionUID,
+                  ChapterTranslateCodec = x.ChapterTranslateCodec,
+                  ChapterTranslateID = x.ChapterTranslateID
+               })
+               .ToList();
+            }
+         }
+         info.TimestampScale = TimestampScale;
+         info.Duration = Duration;
+         info.DateUTC = DateUTC;
+         info.Title = Title;
+         if (copyAppName)
+         {
+            info.MuxingApp = MuxingApp;
+            info.WritingApp = WritingApp;
+         }
       }
 
       public void ReadFrom(EBMLMasterElement element)
@@ -66,7 +102,7 @@ namespace EBML.Matroska
 
       public async ValueTask Write(EBMLWriter writer, CancellationToken cancellationToken = default)
       {
-         await writer.BeginMasterElement(MatroskaSpecification.Info, 1024, cancellationToken);
+         await writer.BeginMasterElement(MatroskaSpecification.Info, cancellationToken);
          if (SegmentUID != null) { await writer.WriteBinary(MatroskaSpecification.SegmentUID, SegmentUID, cancellationToken); }
          if (SegmentFilename != null) { await writer.WriteString(MatroskaSpecification.SegmentFilename, SegmentFilename, cancellationToken); }
          if (PrevUID != null) { await writer.WriteBinary(MatroskaSpecification.PrevUID, PrevUID, cancellationToken); }
@@ -76,7 +112,7 @@ namespace EBML.Matroska
          if (SegmentFamily != null) { await writer.WriteBinary(MatroskaSpecification.SegmentFamily, SegmentFamily, cancellationToken); }
          if (ChapterTranslateEntries != null && ChapterTranslateEntries.Count > 0)
          {
-            await writer.BeginMasterElement(MatroskaSpecification.ChapterTranslate, 256, cancellationToken);
+            await writer.BeginMasterElement(MatroskaSpecification.ChapterTranslate, cancellationToken);
             for (int i = 0; i < ChapterTranslateEntries.Count; i++)
             {
                var item = ChapterTranslateEntries[i];
@@ -87,7 +123,7 @@ namespace EBML.Matroska
             await writer.EndMasterElement(cancellationToken);
          }
          await writer.WriteUnsignedInteger(MatroskaSpecification.TimestampScale, TimestampScale, cancellationToken);
-         await writer.WriteFloat(MatroskaSpecification.Duration, Duration, cancellationToken);
+         if (Duration > 0) { await writer.WriteFloat(MatroskaSpecification.Duration, Duration, cancellationToken); }
          if (DateUTC != null) { await writer.WriteDate(MatroskaSpecification.DateUTC, DateUTC.Value, cancellationToken); }
          if (Title != null) { await writer.WriteString(MatroskaSpecification.Title, Title, cancellationToken); }
          await writer.WriteString(MatroskaSpecification.MuxingApp, MuxingApp, cancellationToken);
@@ -117,7 +153,7 @@ namespace EBML.Matroska
             info.AddChild(chap);
          }
          info.AddChild(new EBMLUnsignedIntegerElement(MatroskaSpecification.TimestampScale, TimestampScale));
-         info.AddChild(new EBMLFloatElement(MatroskaSpecification.Duration, Duration));
+         if (Duration > 0) { info.AddChild(new EBMLFloatElement(MatroskaSpecification.Duration, Duration)); }
          if (DateUTC != null) { info.AddChild(new EBMLDateElement(MatroskaSpecification.DateUTC, DateUTC.Value)); }
          if (Title != null) { info.AddChild(new EBMLStringElement(MatroskaSpecification.Title, Title)); }
          info.AddChild(new EBMLStringElement(MatroskaSpecification.MuxingApp, MuxingApp));

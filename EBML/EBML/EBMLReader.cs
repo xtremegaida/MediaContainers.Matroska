@@ -23,12 +23,10 @@ namespace EBML
       private ElementLevel currentLevel;
       private EBMLElement lastCachedElement;
 
-      public EBMLMasterElement CurrentContainer => currentLevel?.CachedElement;
-      public EBMLElement CurrentElement => lastCachedElement;
+      public EBMLMasterElement CurrentCachedContainer => currentLevel?.CachedElement;
+      public EBMLElement LastCachedElement => lastCachedElement;
       public long CurrentReaderOffset => reader.TotalBytesRead + startOffset;
       public bool CanSeek => stream?.CanSeek ?? false;
-
-      public bool ElementCachingEnabled { get; set; } = true;
 
       public int MaxInlineBinarySize
       {
@@ -36,7 +34,7 @@ namespace EBML
          set { maxInlineBinarySize = Math.Max(value, 0); }
       }
 
-      private IDataQueueReader CurrentLevelReader => currentLevel?.BlockLimitedReader ?? reader;
+      private IDataQueueReader currentLevelReader => currentLevel?.BlockLimitedReader ?? reader;
 
       private class ElementLevel
       {
@@ -44,6 +42,8 @@ namespace EBML
          public readonly DataQueueLimitedReaderMutable BlockLimitedReader = new();
          public EBMLElementDefiniton Definition;
          public EBMLMasterElement CachedElement;
+         public EBMLVInt DataSize;
+         public long DataOffset;
 
          public ElementLevel(int level) { Level = level; }
 
@@ -82,7 +82,7 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadSignedInteger(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue || size.Value > 8) { return default; }
@@ -104,7 +104,7 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadUnsignedInteger(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue || size.Value > 8) { return default; }
@@ -124,7 +124,7 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadFloat(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue) { return default; }
@@ -153,7 +153,7 @@ namespace EBML
       
       private async ValueTask<EBMLElementStruct> ReadString(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue) { return default; }
@@ -170,7 +170,7 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadDate(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue) { return default; }
@@ -196,7 +196,7 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadBinary(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue) { return default; }
@@ -214,7 +214,7 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadVoid(CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          if (size.IsUnknownValue) { return default; }
@@ -231,13 +231,13 @@ namespace EBML
 
       private async ValueTask<EBMLElementStruct> ReadMaster(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
-         var reader = CurrentLevelReader;
+         var reader = currentLevelReader;
          var size = await EBMLVInt.Read(reader, cancellationToken);
          if (size.IsEmpty) { return default; }
          return new EBMLElementStruct(def, size, CurrentReaderOffset) { Reader = reader };
       }
 
-      public async ValueTask<EBMLElementStruct> ReadNextElementRawUncached(CancellationToken cancellationToken = default)
+      public async ValueTask<EBMLElementStruct> ReadNextElementRaw(bool cacheElement = true, CancellationToken cancellationToken = default)
       {
          if (blockLimitedReader.CanReadLength > 0)
          {
@@ -245,7 +245,7 @@ namespace EBML
          }
          while (true)
          {
-            var id = await EBMLVInt.Read(CurrentLevelReader, cancellationToken);
+            var id = await EBMLVInt.Read(currentLevelReader, cancellationToken);
             if (id.IsEmpty) { if (currentLevel == null) { return default; } PopLevel(); continue; }
             elementTypes.TryGetValue(id.ValueWithMarker, out var def);
             EBMLElementStruct element;
@@ -268,55 +268,52 @@ namespace EBML
             {
                element = await ReadBinary(EBMLElementDefiniton.Unknown, cancellationToken);
             }
-            if (element.Definition.Type == EBMLElementType.Master) { PushLevel(element); }
+            if (element.Definition == null) { return element; }
+            lastCachedElement = null;
+            if (cacheElement)
+            {
+               lastCachedElement = element.ToElement();
+               if (currentLevel != null)
+               {
+                  if (currentLevel.CachedElement == null) { CacheCurrentContainerTree(); }
+                  currentLevel.CachedElement.AddChild(lastCachedElement);
+               }
+            }
+            if (element.Definition.Type == EBMLElementType.Master)
+            {
+               var newLevel = (currentLevel?.Level ?? -1) + 1;
+               if (masterBlocks.Count <= newLevel) { masterBlocks.Add(new ElementLevel(masterBlocks.Count)); }
+               currentLevel = masterBlocks[newLevel];
+               currentLevel.BlockLimitedReader.SetReadSource(element.Reader, element.DataSize.IsUnknownValue ? -1 : (long)element.DataSize.Value);
+               currentLevel.Definition = element.Definition;
+               currentLevel.DataSize = element.DataSize;
+               currentLevel.DataOffset = element.DataOffset;
+               currentLevel.CachedElement = cacheElement ? (EBMLMasterElement)lastCachedElement : null;
+            }
             while (currentLevel != null && currentLevel.BlockLimitedReader.IsReadClosed) { PopLevel(); }
             return element;
          }
       }
 
-      public async ValueTask<EBMLElement> ReadNextElement(CancellationToken cancellationToken = default)
+      public async ValueTask<EBMLElement> ReadNextElement(bool cacheElement = true, CancellationToken cancellationToken = default)
       {
-         var element = await ReadNextElementRawUncached(cancellationToken);
+         var element = await ReadNextElementRaw(cacheElement, cancellationToken);
          if (element.Definition == null) { return null; }
-         lastCachedElement = element.ToElement();
-         if (ElementCachingEnabled)
-         {
-            if (element.Definition.Type == EBMLElementType.Master)
-            {
-               currentLevel.CachedElement = (EBMLMasterElement)lastCachedElement;
-               if (currentLevel.Level > 0)
-               {
-                  masterBlocks[currentLevel.Level - 1].CachedElement?.AddChild(lastCachedElement);
-               }
-            }
-            else
-            {
-               CurrentContainer?.AddChild(lastCachedElement);
-            }
-         }
          return lastCachedElement;
       }
 
-      public void ReplaceCurrentContainer(EBMLMasterElement container)
+      public void CacheCurrentContainerTree()
       {
-         if (currentLevel != null) { currentLevel.CachedElement = container; }
-         else
+         int level = (currentLevel?.Level ?? -1) + 1;
+         for (int i = 0; i < level; i++)
          {
-            if (masterBlocks.Count == 0) { masterBlocks.Add(new ElementLevel(0)); }
-            currentLevel = masterBlocks[0];
-            currentLevel.Definition = container.Definition;
-            currentLevel.CachedElement = container;
+            var obj = masterBlocks[i];
+            if (obj.CachedElement == null)
+            {
+               obj.CachedElement = new EBMLMasterElement(obj.Definition, obj.DataSize, obj.DataOffset);
+               if (i > 0) { masterBlocks[i - 1].CachedElement.AddChild(obj.CachedElement); }
+            }
          }
-      }
-
-      private void PushLevel(EBMLElementStruct master)
-      {
-         var newLevel = (currentLevel?.Level ?? -1) + 1;
-         if (masterBlocks.Count <= newLevel) { masterBlocks.Add(new ElementLevel(masterBlocks.Count)); }
-         currentLevel = masterBlocks[newLevel];
-         currentLevel.BlockLimitedReader.SetReadSource(master.Reader, master.DataSize.IsUnknownValue ? -1 : (long)master.DataSize.Value);
-         currentLevel.Definition = master.Definition;
-         currentLevel.CachedElement = null;
       }
 
       private void PopLevel()

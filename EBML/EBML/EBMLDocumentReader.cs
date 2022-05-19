@@ -31,7 +31,7 @@ namespace EBML
          {
             throw new Exception("Unrecognised EBML doctype: " + header.DocType + " version " + header.DocTypeVersion);
          }
-         var body = await reader.ReadNextElement(cancellationToken) as EBMLMasterElement;
+         var body = await reader.ReadNextElement(true, cancellationToken) as EBMLMasterElement;
          if (body == null) { throw new Exception("Expected a master element as document body"); }
          return new EBMLDocumentReader(reader, header, body);
       }

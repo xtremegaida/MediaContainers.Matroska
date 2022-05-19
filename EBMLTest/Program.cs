@@ -14,26 +14,81 @@ namespace EBMLTest
    {
       static void Main(string[] args)
       {
-         //var config = DefaultConfig.Instance;
-         //config = config.WithOptions(ConfigOptions.DisableOptimizationsValidator);
-         //BenchmarkRunner.Run<Test>(config);
+         /*var config = DefaultConfig.Instance;
+         config = config.WithOptions(ConfigOptions.DisableOptimizationsValidator);
+         BenchmarkRunner.Run<Test>(config);*/
          //var x = new Test();
-         //x.TestFunc().Wait();
+         //for (int i = 0; i < 100; i++) { x.TestFunc().Wait(); }
          Task.Run(() => TestFunc()).Wait();
       }
 
       static async Task TestFunc()
       {
-         using (var buffer = new BufferedStream(File.OpenRead("..\\..\\..\\a.webm")))
+         using (var buffer = new MemoryStream(File.ReadAllBytes("..\\..\\..\\c.webm")))
+         using (var output = new MemoryStream())
+         using (var doc = await MatroskaReader.Read(buffer))
+         using (var docOut = await MatroskaWriter.Write(output, false, null, MatroskaWriter.DocTypeWebM))
+         {
+            await doc.ReadTrackInfo();
+            Console.WriteLine(doc.Document.Header.OriginalElement.ToFullString());
+            //Console.WriteLine(doc.SeekHead.ToString());
+            //Console.WriteLine(doc.Document.Body.ToFullString());
+
+            doc.Info.CopyTo(docOut.Info);
+            doc.Tracks.CopyTo(docOut.Tracks);
+            doc.Tags.CopyTo(docOut.Tags);
+            await docOut.WriteTrackInfo();
+            while (true)
+            {
+               var frame = await doc.ReadFrame();
+               if (frame.Buffer == null) { break; }
+               try { await docOut.WriteFrame(frame); }
+               finally { frame.Buffer.Dispose(); }
+            }
+            await docOut.WriteSeekInfo();
+            await docOut.DisposeAsync();
+
+            File.WriteAllBytes("..\\..\\..\\c2.webm", output.ToArray());
+
+            //Console.WriteLine(doc.Document.Header.OriginalElement.ToFullString());
+            //doc.Document.Reader.MaxInlineBinarySize = 256;
+            //while (!doc.Document.Body.IsFullyRead) { await doc.Document.Reader.ReadNextElement(); }
+         }
+         int clusterCount = 0;
+         using (var buffer = new MemoryStream(File.ReadAllBytes("..\\..\\..\\c2.webm")))
          using (var doc = await MatroskaReader.Read(buffer))
          {
+            await doc.ReadTrackInfo();
             Console.WriteLine(doc.Document.Header.OriginalElement.ToFullString());
-            await doc.Document.Body.ReadToEnd();
-            doc.ScanTrackInfo();
-            Console.WriteLine(doc.Document.Body.ToFullString());
             Console.WriteLine(doc.SeekHead.ToString());
-            Console.WriteLine(doc.Tracks.ToElement().ToFullString());
-            Console.WriteLine(doc.Cues.ToElement().ToFullString());
+            var cacheOn = false;
+            while (true)
+            {
+               var def = (await doc.Document.Reader.ReadNextElementRaw(cacheOn)).Definition;
+               if (def == null) { break; }
+               if (def == MatroskaSpecification.Cluster) { clusterCount++; }
+               if (!def.FullPath.StartsWith("\\Segment\\Cluster")) { cacheOn = true; }
+            }
+            Console.WriteLine(doc.Document.Body.ToFullString());
+            Console.WriteLine("Cluster Count: " + clusterCount);
+         }
+         clusterCount = 0;
+         using (var buffer = new MemoryStream(File.ReadAllBytes("..\\..\\..\\c.webm")))
+         using (var doc = await MatroskaReader.Read(buffer))
+         {
+            await doc.ReadTrackInfo();
+            Console.WriteLine(doc.Document.Header.OriginalElement.ToFullString());
+            Console.WriteLine(doc.SeekHead.ToString());
+            var cacheOn = false;
+            while (true)
+            {
+               var def = (await doc.Document.Reader.ReadNextElementRaw(cacheOn)).Definition;
+               if (def == null) { break; }
+               if (def == MatroskaSpecification.Cluster) { clusterCount++; }
+               if (!def.FullPath.StartsWith("\\Segment\\Cluster")) { cacheOn = true; }
+            }
+            Console.WriteLine(doc.Document.Body.ToFullString());
+            Console.WriteLine("Cluster Count: " + clusterCount);
          }
       }
    }
@@ -42,21 +97,35 @@ namespace EBMLTest
    [RyuJitX64Job]
    public class Test
    {
+      public static byte[] fileInput;
+
+      static Test()
+      {
+         fileInput = File.ReadAllBytes(@"D:\Robert\EBML\EBMLTest\c.webm");
+      }
+
       [Benchmark]
       public async Task TestFunc()
       {
          var cache = new DataBufferCache();
-         var buffer = new byte[256];
-         using (var queue = new DataQueue(256, cache))
+         using (var output = new MemoryStream())
+         using (var doc = await MatroskaReader.Read(new DataQueueMemoryReader(fileInput), false, cache))
+         using (var docOut = await MatroskaWriter.Write(output, false, null, MatroskaWriter.DocTypeWebM))
          {
-            for (int i = 1 << 20; i > 0; i--)
+            await doc.ReadTrackInfo();
+            doc.Info.CopyTo(docOut.Info);
+            doc.Tracks.CopyTo(docOut.Tracks);
+            await docOut.WriteTrackInfo();
+            while (true)
             {
-               await queue.WriteAsync(buffer);
-               await queue.ReadAsync(buffer);
+               var frame = await doc.ReadFrame();
+               if (frame.Buffer == null) { break; }
+               try { await docOut.WriteFrame(frame); }
+               finally { frame.Buffer.Dispose(); }
             }
+            await docOut.WriteSeekInfo();
+            await docOut.DisposeAsync();
          }
-         //Console.WriteLine(cache.BufferMemoryReserveBytes);
-         //Console.WriteLine(cache.BufferMemoryUsedBytes);
       }
    }
 }

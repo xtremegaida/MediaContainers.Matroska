@@ -255,6 +255,13 @@ namespace EBML
                   OnBlockWrite?.Invoke();
                   await task;
                   writeLock.Enter(ref locked);
+                  if (forward != null)
+                  {
+                     if (locked) { locked = false; writeLock.Exit(); }
+                     await forward.WriteByteAsync(data, cancellationToken);
+                     bytesRead++; bytesWritten++;
+                     return;
+                  }
                }
                else
                {
@@ -303,6 +310,14 @@ namespace EBML
                   OnBlockWrite?.Invoke();
                   await task;
                   writeLock.Enter(ref locked);
+                  if (forward != null)
+                  {
+                     if (locked) { locked = false; writeLock.Exit(); }
+                     await forward.WriteAsync(buffer, cancellationToken);
+                     bytesRead += buffer.Length;
+                     bytesWritten += buffer.Length;
+                     return;
+                  }
                }
                else
                {
@@ -448,7 +463,11 @@ namespace EBML
                   if ((headRead == null || headRead.ReadOffset >= headRead.WriteOffset) && bufferQueue.Count == 0)
                   {
                      forward = writer;
-                     if (headRead != null) { RecycleHead(); }
+                     if (headRead != null)
+                     {
+                        headRead.Dispose();
+                        headRead = null;
+                     }
                      tailWrite = null;
                      break;
                   }

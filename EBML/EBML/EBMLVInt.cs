@@ -75,6 +75,12 @@ namespace EBML
          }
       }
 
+      public void Write(DataBuffer buffer)
+      {
+         buffer.Buffer[buffer.WriteOffset++] = (byte)((0x100 >> WidthBytes) | (byte)(Value >> ((WidthBytes - 1) << 3)));
+         for (int i = 2; i <= WidthBytes; i++) { buffer.Buffer[buffer.WriteOffset++] = (byte)((Value >> ((WidthBytes - i) << 3)) & 0xff); }
+      }
+
       public static async ValueTask<EBMLVInt> Read(IDataQueueReader buffer, CancellationToken cancellationToken = default)
       {
          var prefix = await buffer.ReadByteAsync(cancellationToken);

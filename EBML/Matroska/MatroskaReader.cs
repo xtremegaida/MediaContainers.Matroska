@@ -10,8 +10,8 @@ namespace EBML.Matroska
    {
       private static readonly EBMLDocType[] docTypes = new EBMLDocType[]
       {
-         new EBMLDocType("matroska", 4),
-         new EBMLDocType("webm", 4),
+         new EBMLDocType("matroska", 4, 4),
+         new EBMLDocType("webm", 4, 4),
       };
 
       private readonly DataBufferCache cache;
@@ -19,8 +19,10 @@ namespace EBML.Matroska
       private readonly MatroskaSeekHead seekHead = new();
       private readonly MatroskaInfo info = new();
       private readonly MatroskaTracks tracks = new();
+      private readonly MatroskaTags tags = new();
       private readonly MatroskaCues cues = new();
       private readonly DataQueueMemoryReaderMutable memoryReader = new();
+      private readonly byte[] readBytes = new byte[8];
       private MatroskaTrackEntry[] trackByNumber;
       private Queue<MatroskaFrame> frameQueue;
       private long clusterTimestamp;
@@ -35,6 +37,7 @@ namespace EBML.Matroska
       public MatroskaSeekHead SeekHead => seekHead;
       public MatroskaInfo Info => info;
       public MatroskaTracks Tracks => tracks;
+      public MatroskaTags Tags => tags;
       public MatroskaCues Cues => cues;
 
       static MatroskaReader()
@@ -53,7 +56,7 @@ namespace EBML.Matroska
          }
          if (!canRead)
          {
-            throw new ArgumentException("Unsupported DocType: " + doc.Header.DocType, nameof(doc));
+            throw new ArgumentException("Unsupported DocType: " + doc.Header.DocType + " " + doc.Header.DocTypeReadVersion, nameof(doc));
          }
          document = doc;
          if (doc.Body.Definition != MatroskaSpecification.Segment)
@@ -108,6 +111,10 @@ namespace EBML.Matroska
             {
                tracks.AddTrackEntry(element as EBMLMasterElement);
             }
+            else if (element.Definition == MatroskaSpecification.Tags)
+            {
+               tags.AddTagEntry(element as EBMLMasterElement);
+            }
             else if (element.Definition == MatroskaSpecification.Cues)
             {
                cues.AddCueEntry(element as EBMLMasterElement, document.Body.DataOffset);
@@ -139,11 +146,10 @@ namespace EBML.Matroska
       {
          if (readTrackInfo) { return; }
          readTrackInfo = true;
-         document.Reader.ElementCachingEnabled = true;
          document.Reader.MaxInlineBinarySize = 4096;
-         while (document.Reader.CurrentElement.Definition != MatroskaSpecification.Cluster)
+         while (document.Reader.LastCachedElement?.Definition != MatroskaSpecification.Cluster)
          {
-            if (await document.Reader.ReadNextElement(cancellationToken) == null) { break; }
+            if (await document.Reader.ReadNextElement(true, cancellationToken) == null) { break; }
          }
          ScanTrackInfo();
       }
@@ -154,9 +160,8 @@ namespace EBML.Matroska
          if (!readTrackInfo) { await ReadTrackInfo(cancellationToken); }
          while (true)
          {
-            document.Reader.ElementCachingEnabled = false;
             document.Reader.MaxInlineBinarySize = 0;
-            var element = await document.Reader.ReadNextElementRawUncached(cancellationToken);
+            var element = await document.Reader.ReadNextElementRaw(false, cancellationToken);
             if (element.Definition == null) { return default; }
             if (element.Definition == MatroskaSpecification.Timestamp)
             {
@@ -182,11 +187,10 @@ namespace EBML.Matroska
                      if (tracks[idx].TrackNumber == trackIndex) { trackEntry = tracks[idx]; break; }
                   }
                }
-               short timestampOffset = (byte)(await reader.ReadByteAsync(cancellationToken));
-               timestampOffset = (short)((timestampOffset << 8) | await reader.ReadByteAsync(cancellationToken));
+               if (await reader.ReadAsync(new Memory<byte>(readBytes, 0, 3), true, cancellationToken) < 3) { return default; }
+               var timestampOffset = (short)((readBytes[0] << 8) | readBytes[1]);
                var timestamp = clusterTimestamp + timestampOffset;
-               var flags = await reader.ReadByteAsync(cancellationToken);
-               if (flags < 0) { return default; }
+               var flags = readBytes[2];
                MatroskaFrame firstFrame = default;
                int frameCount = 0;
                if ((flags & 0x06) != 0) // Has lacing
@@ -226,7 +230,7 @@ namespace EBML.Matroska
                      var size = frameIndex == frameCount ? (int)reader.UnreadLength : lacingSizes[frameIndex];
                      buffer = cache.Pop(size);
                      buffer.WriteOffset = await reader.ReadAsync(new Memory<byte>(buffer.Buffer, 0, size), true, cancellationToken);
-                     var frame = new MatroskaFrame(trackEntry, trackIndex, timestamp, buffer);
+                     var frame = new MatroskaFrame(trackEntry, trackIndex, timestamp, buffer, (flags & 0x80) != 0);
                      if (frameIndex == 0) { firstFrame = frame; }
                      else
                      {
@@ -243,9 +247,6 @@ namespace EBML.Matroska
                      element.Definition.Type == EBMLElementType.Master &&
                     !element.Definition.Path.StartsWith(@"\Segment\Cluster"))
             {
-               var obj = new EBMLMasterElement(element.Definition, element.DataSize, element.DataOffset);
-               document.Body.AddChild(obj);
-               document.Reader.ReplaceCurrentContainer(obj);
                readTrackInfo = false;
                await ReadTrackInfo(cancellationToken);
             }
@@ -262,27 +263,6 @@ namespace EBML.Matroska
             while (frameQueue.Count > 0) { frameQueue.Dequeue().Buffer.Dispose(); }
             frameQueue = null;
          }
-      }
-   }
-
-   public struct MatroskaFrame : IDisposable
-   {
-      public readonly MatroskaTrackEntry Track;
-      public readonly long Timestamp;
-      public readonly DataBuffer Buffer;
-      public readonly int TrackIndex;
-
-      public MatroskaFrame(MatroskaTrackEntry track, int trackIndex, long timestamp, DataBuffer buffer)
-      {
-         Track = track;
-         TrackIndex = trackIndex;
-         Timestamp = timestamp;
-         Buffer = buffer;
-      }
-
-      public void Dispose()
-      {
-         Buffer?.Dispose();
       }
    }
 }

@@ -26,7 +26,7 @@ namespace EBML.Matroska
 
       public async ValueTask Write(EBMLWriter writer, CancellationToken cancellationToken = default)
       {
-         await writer.BeginMasterElement(MatroskaSpecification.Cues, 32768, cancellationToken);
+         await writer.BeginMasterElement(MatroskaSpecification.Cues, cancellationToken);
          for (int i = 0; i < Count; i++) { await this[i].Write(writer, cancellationToken); }
          await writer.EndMasterElement(cancellationToken);
       }

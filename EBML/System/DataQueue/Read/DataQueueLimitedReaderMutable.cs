@@ -17,7 +17,7 @@ namespace EBML
       {
          get
          {
-            var canRead = reader.UnreadLength;
+            var canRead = reader?.UnreadLength ?? 0;
             if (!isUnknownSize)
             {
                var maxRead = maxReadBytes - totalBytesRead;

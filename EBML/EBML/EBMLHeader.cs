@@ -55,10 +55,10 @@ namespace EBML
 
       public static async ValueTask<EBMLHeader> Read(EBMLReader reader, CancellationToken cancellationToken = default)
       {
-         var header = await reader.ReadNextElement(cancellationToken);
+         var header = await reader.ReadNextElement(true, cancellationToken);
          if (header == null) { throw new Exception("Unexpected end of stream"); }
          if (header.Definition != EBMLElementDefiniton.EBML) { throw new Exception("Expected EBML header; read different element"); }
-         while (!header.IsFullyRead) { if ((await reader.ReadNextElement(cancellationToken)) == null) { break; } }
+         while (!header.IsFullyRead) { if ((await reader.ReadNextElement(true, cancellationToken)) == null) { break; } }
          return new EBMLHeader(header as EBMLMasterElement);
       }
 
@@ -82,8 +82,9 @@ namespace EBML
 
       public async ValueTask Write(EBMLWriter writer, CancellationToken cancellationToken = default)
       {
-         await writer.BeginMasterElement(EBMLElementDefiniton.EBML, 256, cancellationToken);
+         await writer.BeginMasterElement(EBMLElementDefiniton.EBML, cancellationToken);
          await writer.WriteUnsignedInteger(EBMLElementDefiniton.EBMLVersion, (ulong)EBMLVersion, cancellationToken);
+         await writer.WriteUnsignedInteger(EBMLElementDefiniton.EBMLReadVersion, (ulong)EBMLReadVersion, cancellationToken);
          await writer.WriteUnsignedInteger(EBMLElementDefiniton.EBMLMaxIDLength, (ulong)EBMLMaxIDLength, cancellationToken);
          await writer.WriteUnsignedInteger(EBMLElementDefiniton.EBMLMaxSizeLength, (ulong)EBMLMaxSizeLength, cancellationToken);
          await writer.WriteString(EBMLElementDefiniton.DocType, DocType, cancellationToken);
@@ -93,7 +94,7 @@ namespace EBML
          {
             foreach (var ext in DocTypeExtensions)
             {
-               await writer.BeginMasterElement(EBMLElementDefiniton.DocTypeExtension, 256, cancellationToken);
+               await writer.BeginMasterElement(EBMLElementDefiniton.DocTypeExtension, cancellationToken);
                await writer.WriteString(EBMLElementDefiniton.DocTypeExtensionName, ext.Key, cancellationToken);
                await writer.WriteUnsignedInteger(EBMLElementDefiniton.DocTypeExtensionVersion, ext.Value, cancellationToken);
                await writer.EndMasterElement(cancellationToken);
@@ -106,6 +107,7 @@ namespace EBML
       {
          var header = new EBMLMasterElement(EBMLElementDefiniton.EBML);
          header.AddChild(new EBMLUnsignedIntegerElement(EBMLElementDefiniton.EBMLVersion, (ulong)EBMLVersion));
+         header.AddChild(new EBMLUnsignedIntegerElement(EBMLElementDefiniton.EBMLReadVersion, (ulong)EBMLReadVersion));
          header.AddChild(new EBMLUnsignedIntegerElement(EBMLElementDefiniton.EBMLMaxIDLength, (ulong)EBMLMaxIDLength));
          header.AddChild(new EBMLUnsignedIntegerElement(EBMLElementDefiniton.EBMLMaxSizeLength, (ulong)EBMLMaxSizeLength));
          header.AddChild(new EBMLStringElement(EBMLElementDefiniton.DocType, DocType));

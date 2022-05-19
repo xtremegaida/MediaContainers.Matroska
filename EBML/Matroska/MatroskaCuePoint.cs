@@ -34,12 +34,12 @@ namespace EBML.Matroska
 
       public async ValueTask Write(EBMLWriter writer, CancellationToken cancellationToken = default)
       {
-         await writer.BeginMasterElement(MatroskaSpecification.CuePoint, 256, cancellationToken);
+         await writer.BeginMasterElement(MatroskaSpecification.CuePoint, cancellationToken);
          await writer.WriteUnsignedInteger(MatroskaSpecification.CueTime, Timestamp, cancellationToken);
          for (int i = 0; i < Count; i++)
          {
             var track = this[i];
-            await writer.BeginMasterElement(MatroskaSpecification.CueTrackPositions, 64, cancellationToken);
+            await writer.BeginMasterElement(MatroskaSpecification.CueTrackPositions, cancellationToken);
             await writer.WriteUnsignedInteger(MatroskaSpecification.CueTrack, (ulong)track.CueTrack, cancellationToken);
             await writer.WriteUnsignedInteger(MatroskaSpecification.CueClusterPosition, track.CueClusterPosition - SegmentOffset, cancellationToken);
             if (track.CueRelativePosition > 0) { await writer.WriteUnsignedInteger(MatroskaSpecification.CueRelativePosition, track.CueRelativePosition, cancellationToken); }

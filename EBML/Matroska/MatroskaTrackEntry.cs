@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -108,6 +109,92 @@ namespace EBML.Matroska
          FreeResizing = 0,
          KeepAspectRatio = 1,
          Fixed = 2
+      }
+
+      public void CopyTo(MatroskaTrackEntry track, bool shallow = false)
+      {
+         track.TrackNumber = TrackNumber;
+         track.TrackUID = TrackUID;
+         track.TrackType = TrackType;
+         track.FlagEnabled = FlagEnabled;
+         track.FlagDefault = FlagDefault;
+         track.FlagForced = FlagForced;
+         track.FlagHearingImpaired = FlagHearingImpaired;
+         track.FlagVisualImpaired = FlagVisualImpaired;
+         track.FlagTextDescriptions = FlagTextDescriptions;
+         track.FlagOriginal = FlagOriginal;
+         track.FlagCommentary = FlagCommentary;
+         track.FlagLacing = FlagLacing;
+         track.MinCache = MinCache;
+         track.MaxCache = MaxCache;
+         track.DefaultDuration = DefaultDuration;
+         track.DefaultDecodedFieldDuration = DefaultDecodedFieldDuration;
+         track.MaxBlockAdditionID = MaxBlockAdditionID;
+         if (shallow) { track.BlockAdditionMappingEntries = BlockAdditionMappingEntries; }
+         else
+         {
+            track.BlockAdditionMappingEntries = null;
+            if (BlockAdditionMappingEntries != null)
+            {
+               track.BlockAdditionMappingEntries = BlockAdditionMappingEntries.Select(x => new BlockAdditionMapping()
+               {
+                  BlockAddIDExtraData = x.BlockAddIDExtraData,
+                  BlockAddIDName = x.BlockAddIDName,
+                  BlockAddIDType = x.BlockAddIDType,
+                  BlockAddIDValue = x.BlockAddIDValue
+               })
+               .ToList();
+            }
+         }
+         track.Name = Name;
+         track.Language = Language;
+         track.LanguageIETF = LanguageIETF;
+         track.CodecID = CodecID;
+         track.CodecPrivate = CodecPrivate;
+         track.CodecName = CodecName;
+         track.CodecDecodeAll = CodecDecodeAll;
+         if (shallow) { track.TrackOverlay = TrackOverlay; }
+         else { track.TrackOverlay = TrackOverlay?.ToList(); }
+         track.CodecDelay = CodecDelay;
+         track.SeekPreRoll = SeekPreRoll;
+         if (shallow) { track.TrackTranslateEntries = TrackTranslateEntries; }
+         else
+         {
+            track.TrackTranslateEntries = null;
+            if (TrackTranslateEntries != null)
+            {
+               track.TrackTranslateEntries = TrackTranslateEntries.Select(x => new TrackTranslate()
+               {
+                  TrackTranslateCodec = x.TrackTranslateCodec,
+                  TrackTranslateEditionUID = x.TrackTranslateEditionUID,
+                  TrackTranslateTrackID = x.TrackTranslateTrackID
+               })
+               .ToList();
+            }
+         }
+         track.HasVideo = HasVideo;
+         track.FlagInterlaced = FlagInterlaced;
+         track.FieldOrder = FieldOrder;
+         track.StereoMode = StereoMode;
+         track.AlphaMode = AlphaMode;
+         track.PixelWidth = PixelWidth;
+         track.PixelHeight = PixelHeight;
+         track.PixelCropBottom = PixelCropBottom;
+         track.PixelCropTop = PixelCropTop;
+         track.PixelCropLeft = PixelCropLeft;
+         track.PixelCropRight = PixelCropRight;
+         track.DisplayWidth = DisplayWidth;
+         track.DisplayHeight = DisplayHeight;
+         track.DisplayUnit = DisplayUnit;
+         track.AspectRatioType = AspectRatioType;
+         track.UncompressedFourCC = UncompressedFourCC;
+         track.GammaValue = GammaValue;
+         track.FrameRate = FrameRate;
+         track.HasAudio = HasAudio;
+         track.SamplingFrequency = SamplingFrequency;
+         track.Channels = Channels;
+         track.ChannelPositions = ChannelPositions;
+         track.BitDepth = BitDepth;
       }
 
       public void ReadFrom(EBMLMasterElement element)
@@ -229,7 +316,7 @@ namespace EBML.Matroska
 
       public async ValueTask Write(EBMLWriter writer, CancellationToken cancellationToken = default)
       {
-         await writer.BeginMasterElement(MatroskaSpecification.TrackEntry, 2048, cancellationToken);
+         await writer.BeginMasterElement(MatroskaSpecification.TrackEntry, cancellationToken);
          await writer.WriteUnsignedInteger(MatroskaSpecification.TrackNumber, (ulong)TrackNumber, cancellationToken);
          await writer.WriteUnsignedInteger(MatroskaSpecification.TrackUID, TrackUID, cancellationToken);
          await writer.WriteUnsignedInteger(MatroskaSpecification.TrackType, (ulong)TrackType, cancellationToken);
@@ -252,7 +339,7 @@ namespace EBML.Matroska
             for (int i = 0; i < BlockAdditionMappingEntries.Count; i++)
             {
                var entry = BlockAdditionMappingEntries[i];
-               await writer.BeginMasterElement(MatroskaSpecification.BlockAdditionMapping, 64, cancellationToken);
+               await writer.BeginMasterElement(MatroskaSpecification.BlockAdditionMapping, cancellationToken);
                if (entry.BlockAddIDValue > 0) { await writer.WriteUnsignedInteger(MatroskaSpecification.BlockAddIDValue, entry.BlockAddIDValue, cancellationToken); }
                if (entry.BlockAddIDName != null) { await writer.WriteString(MatroskaSpecification.BlockAddIDName, entry.BlockAddIDName, cancellationToken); }
                await writer.WriteUnsignedInteger(MatroskaSpecification.BlockAddIDType, entry.BlockAddIDType, cancellationToken);
@@ -281,7 +368,7 @@ namespace EBML.Matroska
             for (int i = 0; i < TrackTranslateEntries.Count; i++)
             {
                var entry = TrackTranslateEntries[i];
-               await writer.BeginMasterElement(MatroskaSpecification.TrackTranslate, 64, cancellationToken);
+               await writer.BeginMasterElement(MatroskaSpecification.TrackTranslate, cancellationToken);
                if (entry.TrackTranslateEditionUID != null) { await writer.WriteBinary(MatroskaSpecification.TrackTranslateEditionUID, entry.TrackTranslateEditionUID, cancellationToken); }
                await writer.WriteUnsignedInteger(MatroskaSpecification.TrackTranslateCodec, (ulong)entry.TrackTranslateCodec, cancellationToken);
                await writer.WriteBinary(MatroskaSpecification.TrackTranslateTrackID, entry.TrackTranslateTrackID, cancellationToken);
@@ -290,7 +377,7 @@ namespace EBML.Matroska
          }
          if (HasVideo)
          {
-            await writer.BeginMasterElement(MatroskaSpecification.Video, 2048, cancellationToken);
+            await writer.BeginMasterElement(MatroskaSpecification.Video, cancellationToken);
             if (FlagInterlaced != VideoInterlacing.Undetermined) { await writer.WriteUnsignedInteger(MatroskaSpecification.FlagInterlaced, (ulong)FlagInterlaced, cancellationToken); }
             if (FieldOrder != VideoInterlacingFieldOrder.Undetermined) { await writer.WriteUnsignedInteger(MatroskaSpecification.FieldOrder, (ulong)FieldOrder, cancellationToken); }
             if (StereoMode > 0) { await writer.WriteUnsignedInteger(MatroskaSpecification.StereoMode, (ulong)StereoMode, cancellationToken); }
@@ -312,7 +399,7 @@ namespace EBML.Matroska
          }
          if (HasAudio)
          {
-            await writer.BeginMasterElement(MatroskaSpecification.Audio, 1024, cancellationToken);
+            await writer.BeginMasterElement(MatroskaSpecification.Audio, cancellationToken);
             await writer.WriteFloat(MatroskaSpecification.SamplingFrequency, SamplingFrequency, cancellationToken);
             if (OutputSamplingFrequency > 0) { await writer.WriteFloat(MatroskaSpecification.OutputSamplingFrequency, OutputSamplingFrequency, cancellationToken); }
             await writer.WriteUnsignedInteger(MatroskaSpecification.Channels, (ulong)Channels, cancellationToken);

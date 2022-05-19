@@ -61,13 +61,13 @@ namespace EBML.Matroska
 
       public async ValueTask Write(EBMLWriter writer, CancellationToken cancellationToken = default)
       {
-         await writer.BeginMasterElement(MatroskaSpecification.SeekHead, 1024, cancellationToken);
+         await writer.BeginMasterElement(MatroskaSpecification.SeekHead, cancellationToken);
          foreach (var index in seekIndices)
          {
             var buffer = new byte[index.Key.Id.WidthBytes];
             ulong id = index.Key.Id.ValueWithMarker;
             for (int i = buffer.Length - 1; i >= 0; i--) { buffer[i] = (byte)(id & 0xff); id >>= 8; }
-            await writer.BeginMasterElement(MatroskaSpecification.Seek, 32, cancellationToken);
+            await writer.BeginMasterElement(MatroskaSpecification.Seek, cancellationToken);
             await writer.WriteBinary(MatroskaSpecification.SeekID, buffer, cancellationToken);
             await writer.WriteUnsignedInteger(MatroskaSpecification.SeekPosition, (ulong)index.Value, cancellationToken);
             await writer.EndMasterElement(cancellationToken);

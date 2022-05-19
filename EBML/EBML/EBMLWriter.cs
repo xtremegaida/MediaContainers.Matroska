@@ -12,34 +12,68 @@ namespace EBML
       private readonly IDataQueueWriter writer;
       private readonly Stream stream;
       private readonly bool keepWriterOpen;
-      private readonly List<Level> masterBlocks = new();
+      private readonly DataBuffer writeBuffer = new(null, new byte[4096]);
+      private int writeBusy;
+      private long startOffset;
+      private bool rewindOnDispose;
       private volatile bool disposed;
       private Level level;
 
+      const int maxMasterElementBufferSize = (1 << (24 - 3)) - 1;
+
       private class Level : IDisposable
       {
+         public readonly Level Parent;
          public readonly EBMLElementDefiniton Definition;
          public readonly DataQueue Buffer;
          public readonly IDataQueueWriter ParentWriter;
+         public readonly long RelativeDataOffset;
+         public readonly bool StreamingMode;
+         public bool NeedSizeWritten;
+         public int? DataSizeWidth;
          public Task ForwardTask;
 
-         public Level(EBMLElementDefiniton def, DataQueue buffer, IDataQueueWriter parent)
+         public Level(Level parent, EBMLElementDefiniton def, DataQueue buffer, IDataQueueWriter parentWriter, bool streamingMode)
          {
+            Parent = parent;
             Definition = def;
             Buffer = buffer;
-            ParentWriter = parent;
-            buffer.OnBlockWrite += ActivateStreamingMode;
+            ParentWriter = parentWriter;
+            StreamingMode = streamingMode;
+            RelativeDataOffset = parentWriter.TotalBytesWritten;
+            buffer.OnBlockWrite += OnBlockWriteEvent;
          }
 
-         public void ActivateStreamingMode()
+         public Task ForwardBuffer(CancellationToken cancellationToken = default)
          {
-            if (ForwardTask != null) { return; }
-            ForwardTask = ForwardAsync();
+            lock (this)
+            {
+               if (ForwardTask == null) { ForwardTask = ForwardAsync(); }
+               if (cancellationToken.CanBeCanceled && !ForwardTask.IsCompleted) { return ForwardTask.WaitAsync(cancellationToken); }
+               return ForwardTask;
+            }
+         }
+
+         private void OnBlockWriteEvent()
+         {
+            ForwardBuffer();
          }
 
          private async Task ForwardAsync()
          {
-            await EBMLVInt.CreateUnknown(Definition.AllowUnknownSize ? 1 : 8).Write(ParentWriter);
+            EBMLVInt sizeVInt;
+            if (Buffer.IsWriteClosed)
+            {
+               sizeVInt = new EBMLVInt((ulong)Buffer.UnreadLength);
+            }
+            else
+            {
+               NeedSizeWritten = true;
+               if (StreamingMode && Definition.AllowUnknownSize) { NeedSizeWritten = false; }
+               sizeVInt = EBMLVInt.CreateUnknown(NeedSizeWritten ? 8 : 1);
+            }
+            DataSizeWidth = sizeVInt.WidthBytes;
+            await sizeVInt.Write(ParentWriter);
             await Buffer.ForwardTo(ParentWriter);
          }
 
@@ -49,8 +83,12 @@ namespace EBML
          }
       }
 
+      public bool StreamingMode { get; private set; }
       public EBMLElementDefiniton CurrentContainer => level?.Definition;
+      public long CurrentContainerSize => currentLevelWriter.TotalBytesWritten + writeBuffer.UnreadSize;
       public bool CanSeek => stream?.CanSeek ?? false;
+
+      private IDataQueueWriter currentLevelWriter => level?.Buffer ?? writer;
 
       public EBMLWriter(IDataQueueWriter writer, bool keepWriterOpen = false, DataBufferCache cache = null)
       {
@@ -59,10 +97,15 @@ namespace EBML
          this.cache = cache ?? DataBufferCache.DefaultCache;
       }
 
-      public EBMLWriter(Stream stream, bool keepStreamOpen = false, DataBufferCache cache = null)
+      public EBMLWriter(Stream stream, bool keepStreamOpen = false, DataBufferCache cache = null, bool rewindOnDispose = false)
          : this(new DataQueueStreamWriter(stream, keepStreamOpen), false, cache)
       {
          this.stream = stream;
+         if (stream.CanSeek && rewindOnDispose)
+         {
+            startOffset = stream.Position;
+            this.rewindOnDispose = true;
+         }
       }
 
       public static int CalculateWidth(long value)
@@ -87,17 +130,34 @@ namespace EBML
          return 8;
       }
 
+      public ValueTask FlushInternalBuffer(CancellationToken cancellationToken = default)
+      {
+         if (writeBuffer.UnreadSize == 0) { return ValueTask.CompletedTask; }
+         var memory = new ReadOnlyMemory<byte>(writeBuffer.Buffer, writeBuffer.ReadOffset, writeBuffer.WriteOffset - writeBuffer.ReadOffset);
+         writeBuffer.ReadOffset = 0; writeBuffer.WriteOffset = 0;
+         return currentLevelWriter.WriteAsync(memory, cancellationToken);
+      }
+
       public async ValueTask WriteSignedInteger(EBMLElementDefiniton def, long value, CancellationToken cancellationToken = default)
       {
          if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.SignedInteger) { throw new ArgumentException("Element type mismatch", nameof(def)); }
-
-         var size = new EBMLVInt((ulong)CalculateWidth(value));
-         await def.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         if (size.Value == 0) { return; }
-         for (int i = (int)(size.Value - 1) << 3; i >= 0; i -= 8) { await writer.WriteByteAsync((byte)((value >> i) & 0xff), cancellationToken); }
+         try
+         {
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var size = CalculateWidth(value);
+            var sizeVInt = new EBMLVInt((ulong)size);
+            if (writeBuffer.SpaceLeft < (def.Id.WidthBytes + sizeVInt.WidthBytes + size)) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
+            if (size == 0) { return; }
+            for (int i = (size - 1) << 3; i >= 0; i -= 8)
+            {
+               writeBuffer.Buffer[writeBuffer.WriteOffset++] = (byte)((value >> i) & 0xff);
+            }
+         }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteUnsignedInteger(EBMLElementDefiniton def, ulong value, CancellationToken cancellationToken = default)
@@ -106,11 +166,21 @@ namespace EBML
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.UnsignedInteger) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         var size = new EBMLVInt((ulong)CalculateWidth(value));
-         await def.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         if (size.Value == 0) { return; }
-         for (int i = (int)(size.Value - 1) << 3; i >= 0; i -= 8) { await writer.WriteByteAsync((byte)((value >> i) & 0xff), cancellationToken); }
+         try
+         {
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var size = CalculateWidth(value);
+            var sizeVInt = new EBMLVInt((ulong)size);
+            if (writeBuffer.SpaceLeft < (def.Id.WidthBytes + sizeVInt.WidthBytes + size)) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
+            if (size == 0) { return; }
+            for (int i = (size - 1) << 3; i >= 0; i -= 8)
+            {
+               writeBuffer.Buffer[writeBuffer.WriteOffset++] = (byte)((value >> i) & 0xff);
+            }
+         }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteFloat(EBMLElementDefiniton def, float value, CancellationToken cancellationToken = default)
@@ -119,14 +189,17 @@ namespace EBML
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.Float) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         var size = new EBMLVInt(4);
-         await def.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         using (var tmp = cache.Pop(4))
+         try
          {
-            System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(tmp.Buffer, value);
-            await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, 4), cancellationToken);
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var sizeVInt = new EBMLVInt(4);
+            if (writeBuffer.SpaceLeft < (def.Id.WidthBytes + sizeVInt.WidthBytes + 4)) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(writeBuffer.WriteSpan, value);
+            writeBuffer.WriteOffset += 4;
          }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteFloat(EBMLElementDefiniton def, double value, CancellationToken cancellationToken = default)
@@ -135,14 +208,17 @@ namespace EBML
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.Float) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         var size = new EBMLVInt(8);
-         await def.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         using (var tmp = cache.Pop(8))
+         try
          {
-            System.Buffers.Binary.BinaryPrimitives.WriteDoubleBigEndian(tmp.Buffer, value);
-            await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, 8), cancellationToken);
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var sizeVInt = new EBMLVInt(8);
+            if (writeBuffer.SpaceLeft < (def.Id.WidthBytes + sizeVInt.WidthBytes + 8)) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
+            System.Buffers.Binary.BinaryPrimitives.WriteDoubleBigEndian(writeBuffer.WriteSpan, value);
+            writeBuffer.WriteOffset += 8;
          }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteDate(EBMLElementDefiniton def, DateTime date, CancellationToken cancellationToken = default)
@@ -151,15 +227,18 @@ namespace EBML
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.Date) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         var size = new EBMLVInt(8);
-         await def.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         using (var tmp = cache.Pop(8))
+         try
          {
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var sizeVInt = new EBMLVInt(8);
+            if (writeBuffer.SpaceLeft < (def.Id.WidthBytes + sizeVInt.WidthBytes + 8)) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
             var value = (date.Ticks - EBMLDateElement.Epoch.Ticks) * 100;
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(tmp.Buffer, value);
-            await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, 8), cancellationToken);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(writeBuffer.WriteSpan, value);
+            writeBuffer.WriteOffset += 8;
          }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteString(EBMLElementDefiniton def, string str, CancellationToken cancellationToken = default)
@@ -168,35 +247,64 @@ namespace EBML
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.String && def.Type != EBMLElementType.UTF8) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         if (str == null) { str = string.Empty; }
-         using (var tmp = cache.Pop(str.Length * 4))
+         try
          {
-            var bytes = (def.Type == EBMLElementType.UTF8 ? System.Text.Encoding.UTF8 : System.Text.Encoding.ASCII).GetBytes(str, tmp.Buffer);
-            var size = new EBMLVInt((ulong)bytes);
-            await def.Id.Write(writer, cancellationToken);
-            await size.Write(writer, cancellationToken);
-            await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, bytes), cancellationToken);
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            if (str == null) { str = string.Empty; }
+            var estimatedMaxSize = def.Id.WidthBytes + 8 + (def.Type != EBMLElementType.String ? str.Length : (str.Length * 4));
+            if (writeBuffer.SpaceLeft < estimatedMaxSize) { await FlushInternalBuffer(cancellationToken); }
+            if (writeBuffer.SpaceLeft >= estimatedMaxSize)
+            {
+               var originalOffset = writeBuffer.WriteOffset;
+               writeBuffer.WriteOffset += def.Id.WidthBytes + 1;
+               var size = (def.Type == EBMLElementType.UTF8 ? System.Text.Encoding.UTF8 : System.Text.Encoding.ASCII).GetBytes(str, writeBuffer.WriteSpan);
+               var sizeVInt = new EBMLVInt((ulong)size);
+               if (sizeVInt.WidthBytes > 1) { writeBuffer.WriteSpan.Slice(0, size).CopyTo(writeBuffer.WriteSpan.Slice(sizeVInt.WidthBytes - 1)); }
+               writeBuffer.WriteOffset = originalOffset;
+               def.Id.Write(writeBuffer);
+               sizeVInt.Write(writeBuffer);
+               writeBuffer.WriteOffset += size;
+            }
+            else
+            {
+               if (writeBuffer.UnreadSize > 0) { await FlushInternalBuffer(cancellationToken); }
+               var writer = currentLevelWriter;
+               using (var tmp = cache.Pop(str.Length * 4))
+               {
+                  var size = (def.Type == EBMLElementType.UTF8 ? System.Text.Encoding.UTF8 : System.Text.Encoding.ASCII).GetBytes(str, tmp.Buffer);
+                  var sizeVInt = new EBMLVInt((ulong)size);
+                  await def.Id.Write(writer, cancellationToken);
+                  await sizeVInt.Write(writer, cancellationToken);
+                  await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, size), cancellationToken);
+               }
+            }
          }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteVoid(int bytes, CancellationToken cancellationToken = default)
       {
          if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
 
-         if (bytes < 0) { bytes = 0; }
-         var size = new EBMLVInt((ulong)bytes);
-         await EBMLElementDefiniton.Void.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         using (var tmp = cache.Pop(Math.Min(bytes, 4096)))
+         try
          {
-            Array.Clear(tmp.Buffer, 0, tmp.Buffer.Length);
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            if (bytes < 0) { bytes = 0; }
+            var sizeVInt = new EBMLVInt((ulong)bytes);
+            if (writeBuffer.SpaceLeft < (EBMLElementDefiniton.Void.Id.WidthBytes + sizeVInt.WidthBytes + 16)) { await FlushInternalBuffer(cancellationToken); }
+            EBMLElementDefiniton.Void.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
             while (bytes > 0)
             {
-               var canWrite = Math.Min(bytes, tmp.Buffer.Length);
-               await writer.WriteAsync(new ReadOnlyMemory<byte>(tmp.Buffer, 0, canWrite), cancellationToken);
+               if (writeBuffer.SpaceLeft < 16) { await FlushInternalBuffer(cancellationToken); }
+               var canWrite = writeBuffer.SpaceLeft;
+               if (canWrite > bytes) { canWrite = bytes; }
+               writeBuffer.WriteSpan.Slice(0, canWrite).Clear();
+               writeBuffer.WriteOffset += canWrite;
                bytes -= canWrite;
             }
          }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteBinary(EBMLElementDefiniton def, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
@@ -205,48 +313,70 @@ namespace EBML
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.Binary && def.Type != EBMLElementType.Unknown) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         var size = new EBMLVInt((ulong)bytes.Length);
-         await def.Id.Write(writer, cancellationToken);
-         await size.Write(writer, cancellationToken);
-         await writer.WriteAsync(bytes, cancellationToken);
+         try
+         {
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var sizeVInt = new EBMLVInt((ulong)bytes.Length);
+            var estimatedMaxSize = def.Id.WidthBytes + sizeVInt.WidthBytes + bytes.Length;
+            if (writeBuffer.SpaceLeft < estimatedMaxSize) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
+            if (bytes.Length == 0) { return; }
+
+            var canWrite = writeBuffer.SpaceLeft;
+            if (canWrite > bytes.Length) { canWrite = bytes.Length; }
+            bytes.Slice(0, canWrite).Span.CopyTo(writeBuffer.WriteSpan);
+            writeBuffer.WriteOffset += canWrite;
+            if (bytes.Length > canWrite)
+            {
+               await FlushInternalBuffer(cancellationToken);
+               await currentLevelWriter.WriteAsync(bytes.Slice(canWrite), cancellationToken);
+            }
+         }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
-      public async ValueTask WriteBinary(EBMLElementDefiniton def, IDataQueue bytes, CancellationToken cancellationToken = default)
+      public async ValueTask WriteBinary(EBMLElementDefiniton def, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
       {
          if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
-         if (bytes == null) { throw new ArgumentNullException(nameof(bytes)); }
          if (def.Type != EBMLElementType.Binary && def.Type != EBMLElementType.Unknown) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         await def.Id.Write(writer, cancellationToken);
-         if (bytes.IsWriteClosed)
+         try
          {
-            await new EBMLVInt((ulong)bytes.UnreadLength).Write(writer, cancellationToken);
-            if (bytes is DataQueue dq) { await dq.ForwardTo(writer, cancellationToken); }
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            var sizeVInt = new EBMLVInt((ulong)(header.Length + bytes.Length));
+            var estimatedMaxSize = def.Id.WidthBytes + sizeVInt.WidthBytes + header.Length + bytes.Length;
+            if (writeBuffer.SpaceLeft < estimatedMaxSize) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            sizeVInt.Write(writeBuffer);
+            if (header.Length == 0 && bytes.Length == 0) { return; }
+
+            var canWrite = writeBuffer.SpaceLeft;
+            if (canWrite > header.Length) { canWrite = header.Length; }
+            header.Slice(0, canWrite).Span.CopyTo(writeBuffer.WriteSpan);
+            writeBuffer.WriteOffset += canWrite;
+            if (header.Length > canWrite)
+            {
+               await FlushInternalBuffer(cancellationToken);
+               await currentLevelWriter.WriteAsync(header.Slice(canWrite), cancellationToken);
+            }
+
+            if (writeBuffer.UnreadSize == 0) { canWrite = 0; }
             else
             {
-               using (var target = new DataQueueWriteStream(writer, true))
-               {
-                  await bytes.ReadStream.CopyToAsync(target, cancellationToken);
-               }
+               canWrite = writeBuffer.SpaceLeft;
+               if (canWrite > bytes.Length) { canWrite = bytes.Length; }
+               bytes.Slice(0, canWrite).Span.CopyTo(writeBuffer.WriteSpan);
+               writeBuffer.WriteOffset += canWrite;
             }
-         }
-         else if (!(stream?.CanSeek ?? false)) { await WriteBinary(def, bytes.ReadStream); }
-         else
-         {
-            await EBMLVInt.CreateUnknown(8).Write(writer, cancellationToken);
-            long start = writer.TotalBytesWritten;
-            if (bytes is DataQueue dq) { await dq.ForwardTo(writer, cancellationToken); }
-            else
+            if (bytes.Length > canWrite)
             {
-               using (var target = new DataQueueWriteStream(writer, true))
-               {
-                  await bytes.ReadStream.CopyToAsync(target, cancellationToken);
-               }
+               await FlushInternalBuffer(cancellationToken);
+               await currentLevelWriter.WriteAsync(bytes.Slice(canWrite), cancellationToken);
             }
-            await FlushAsync(cancellationToken);
-            await WriteSizeOnStream(writer.TotalBytesWritten - start, cancellationToken);
          }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteBinary(EBMLElementDefiniton def, Stream bytes, CancellationToken cancellationToken = default)
@@ -256,30 +386,37 @@ namespace EBML
          if (bytes == null) { throw new ArgumentNullException(nameof(bytes)); }
          if (def.Type != EBMLElementType.Binary && def.Type != EBMLElementType.Unknown) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         await def.Id.Write(writer, cancellationToken);
-         if (bytes.CanSeek)
+         try
          {
-            var size = new EBMLVInt((ulong)(bytes.Length - bytes.Position));
-            await size.Write(writer, cancellationToken);
-            if (writer is IDataQueue dq) { await bytes.CopyToAsync(dq.WriteStream, cancellationToken); }
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            if (writeBuffer.UnreadSize > 0) { await FlushInternalBuffer(cancellationToken); }
+            var writer = currentLevelWriter;
+            await def.Id.Write(writer, cancellationToken);
+            if (bytes.CanSeek)
+            {
+               var size = new EBMLVInt((ulong)(bytes.Length - bytes.Position));
+               await size.Write(writer, cancellationToken);
+               if (writer is IDataQueue dq) { await bytes.CopyToAsync(dq.WriteStream, cancellationToken); }
+               else
+               {
+                  using (var target = new DataQueueWriteStream(writer, true))
+                  {
+                     await bytes.CopyToAsync(target, cancellationToken);
+                  }
+               }
+            }
             else
             {
-               using (var target = new DataQueueWriteStream(writer, true))
+               using (var mem = new MemoryStream())
                {
-                  await bytes.CopyToAsync(target, cancellationToken);
+                  await bytes.CopyToAsync(mem, cancellationToken);
+                  await new EBMLVInt((ulong)mem.Length).Write(writer, cancellationToken);
+                  mem.Position = 0;
+                  using (var target = new DataQueueWriteStream(writer, true)) { await mem.CopyToAsync(target, cancellationToken); }
                }
             }
          }
-         else
-         {
-            using (var mem = new MemoryStream())
-            {
-               await bytes.CopyToAsync(mem, cancellationToken);
-               await new EBMLVInt((ulong)mem.Length).Write(writer, cancellationToken);
-               mem.Position = 0;
-               using (var target = new DataQueueWriteStream(writer, true)) { await mem.CopyToAsync(target, cancellationToken); }
-            }
-         }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask WriteElement(EBMLElement element, CancellationToken cancellationToken = default)
@@ -320,94 +457,129 @@ namespace EBML
                break;
             case EBMLElementType.Master:
                var master = (EBMLMasterElement)element;
-               var size = Math.Max(Math.Min(master.EstimateSize() + 32, 32 << 20), 256);
-               await BeginMasterElement(master.Definition, size, cancellationToken);
+               await BeginMasterElement(master.Definition, cancellationToken);
                foreach (var child in master.Children) { await WriteElement(child, cancellationToken); }
                await EndMasterElement(cancellationToken);
                break;
          }
       }
 
-      public async ValueTask BeginMasterElement(EBMLElementDefiniton def, int bufferSize = 256, CancellationToken cancellationToken = default)
+      public async ValueTask BeginMasterElement(EBMLElementDefiniton def, CancellationToken cancellationToken = default)
       {
          if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
          if (def == null) { throw new ArgumentNullException(nameof(def)); }
          if (def.Type != EBMLElementType.Master) { throw new ArgumentException("Element type mismatch", nameof(def)); }
 
-         var writer = level?.Buffer ?? this.writer;
-         await def.Id.Write(writer, cancellationToken);
-         var newLevel = new Level(def, new DataQueue(bufferSize, cache), writer);
-         if (level != null) { masterBlocks.Add(level); }
-         level = newLevel;
+         try
+         {
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            if (writeBuffer.SpaceLeft < def.Id.WidthBytes) { await FlushInternalBuffer(cancellationToken); }
+            def.Id.Write(writeBuffer);
+            await FlushInternalBuffer(cancellationToken);
+            level = new Level(level, def, new DataQueue(maxMasterElementBufferSize, cache), currentLevelWriter, StreamingMode);
+         }
+         finally { Interlocked.Decrement(ref writeBusy); }
       }
 
       public async ValueTask EndMasterElement(CancellationToken cancellationToken = default)
       {
-         if (disposed) { throw new ObjectDisposedException(nameof(EBMLWriter)); }
          if (level == null) { throw new InvalidOperationException(); }
-
-         var endedLevel = level;
-         using (endedLevel)
+         Level endedLevel = null;
+         try
          {
-            if (masterBlocks.Count == 0) { level = null; }
-            else
-            {
-               level = masterBlocks[masterBlocks.Count - 1];
-               masterBlocks.RemoveAt(masterBlocks.Count - 1);
-            }
+            if (Interlocked.Increment(ref writeBusy) != 1) { throw new InvalidOperationException("Concurrent writes not allowed."); }
+            await FlushInternalBuffer(cancellationToken);
+            endedLevel = level;
+            level = level.Parent;
             endedLevel.Buffer.CloseWrite();
-            if (endedLevel.ForwardTask != null)
+            await endedLevel.ForwardBuffer(cancellationToken);
+            if (endedLevel.NeedSizeWritten)
             {
-               if (cancellationToken.CanBeCanceled && !endedLevel.ForwardTask.IsCompleted)
+               if (CanSeek)
                {
-                  await endedLevel.ForwardTask.WaitAsync(cancellationToken);
-               }
-               else
-               {
-                  await endedLevel.ForwardTask;
-               }
-               if (!endedLevel.Definition.AllowUnknownSize)
-               {
-                  if (!(stream?.CanSeek ?? false)) { throw new InvalidOperationException("Block size unknown without seekable stream"); }
                   await FlushAsync(cancellationToken);
-                  await WriteSizeOnStream(endedLevel.Buffer.TotalBytesWritten, cancellationToken);
+                  var blockSize = endedLevel.Buffer.TotalBytesWritten;
+                  stream.Seek(-blockSize - 8, SeekOrigin.Current);
+                  if ((blockSize & ~((1L << 56) - 1)) != 0) { throw new InvalidOperationException("Block size too large"); }
+                  System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(writeBuffer.WriteSpan, blockSize | (1L << 56));
+                  await stream.WriteAsync(writeBuffer.Buffer, writeBuffer.WriteOffset, 8, cancellationToken);
+                  stream.Seek(blockSize, SeekOrigin.Current);
+               }
+               else if (!endedLevel.Definition.AllowUnknownSize)
+               {
+                  throw new InvalidOperationException("Block size unknown without seekable stream");
                }
             }
-            else
-            {
-               await new EBMLVInt((ulong)endedLevel.Buffer.UnreadLength).Write(endedLevel.ParentWriter, cancellationToken);
-               await endedLevel.Buffer.ForwardTo(endedLevel.ParentWriter, cancellationToken);
-            }
+         }
+         finally
+         {
+            Interlocked.Decrement(ref writeBusy);
+            endedLevel?.Dispose();
          }
       }
 
-      private async ValueTask WriteSizeOnStream(long blockSize, CancellationToken cancellationToken = default)
+      public struct RelativeOffset
       {
-         if (!(stream?.CanSeek ?? false)) { throw new InvalidOperationException("Block size unknown without seekable stream"); }
-         var currentPosition = stream.Position;
-         stream.Seek(-blockSize - 8, SeekOrigin.Current);
-         using (var sizeBuffer = cache.Pop(8))
+         private readonly EBMLElementDefiniton relativeTo;
+         private readonly Level parent;
+         private readonly long relOffset;
+         private readonly bool inited;
+
+         public bool Marked => inited;
+
+         public RelativeOffset(EBMLWriter writer, EBMLElementDefiniton relativeTo)
          {
-            if ((blockSize & ~((1L << 56) - 1)) != 0) { throw new InvalidOperationException("Block size too large"); }
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(sizeBuffer.Buffer, blockSize | (1L << 56));
-            await stream.WriteAsync(sizeBuffer.Buffer, 0, 8, cancellationToken);
+            this.relativeTo = relativeTo;
+            parent = writer.level;
+            relOffset = writer.currentLevelWriter.TotalBytesWritten + writer.writeBuffer.UnreadSize;
+            inited = true;
          }
-         stream.Seek(currentPosition, SeekOrigin.Begin);
+
+         public long? Resolve()
+         {
+            if (!inited) { return null; }
+            var offset = relOffset;
+            var current = parent;
+            while (current != null && current.Definition != relativeTo)
+            {
+               if (current.DataSizeWidth == null)
+               {
+                  current.ForwardBuffer();
+                  if (current.DataSizeWidth == null) { return null; }
+               }
+               offset += current.DataSizeWidth.Value + current.RelativeDataOffset;
+               current = current.Parent;
+            }
+            if (current?.Definition != relativeTo)
+            {
+               throw new ArgumentException("Element not found in current hierarchy.", "relativeTo");
+            }
+            return offset;
+         }
+      }
+
+      public RelativeOffset MarkRelativeOffset(EBMLElementDefiniton relativeTo = null)
+      {
+         return new RelativeOffset(this, relativeTo);
       }
 
       public async ValueTask FlushAsync(CancellationToken cancellationToken = default)
       {
          if (level != null)
          {
-            level.ActivateStreamingMode();
-            for (int i = masterBlocks.Count - 1; i >= 0; i--) { masterBlocks[i].ActivateStreamingMode(); }
-            await level.Buffer.WaitForEmpty(cancellationToken);
-            for (int i = masterBlocks.Count - 1; i >= 0; i--) { await masterBlocks[i].Buffer.WaitForEmpty(cancellationToken); }
+            var current = level; do { _ = current.ForwardBuffer(); } while ((current = current.Parent) != null);
+            current = level; do { await current.Buffer.WaitForEmpty(cancellationToken); } while ((current = current.Parent) != null);
          }
-         if (stream != null)
-         {
-            await stream.FlushAsync(cancellationToken);
-         }
+         if (stream != null) { await stream.FlushAsync(cancellationToken); }
+      }
+
+      public async ValueTask<EBMLWriter> SeekWriter(long offset, SeekOrigin origin, CancellationToken cancellationToken = default)
+      {
+         if (!CanSeek) { throw new InvalidOperationException(); }
+         await FlushAsync(cancellationToken);
+         var writer = new EBMLWriter(stream, true, cache, true);
+         stream.Seek(offset, origin);
+         return writer;
       }
 
       public async ValueTask DisposeAsync()
@@ -415,6 +587,8 @@ namespace EBML
          if (disposed) { return; }
          disposed = true;
          while (level != null) { await EndMasterElement(); }
+         await FlushInternalBuffer();
+         if (rewindOnDispose) { stream.Seek(startOffset, SeekOrigin.Begin); }
          if (!keepWriterOpen)
          {
             writer.CloseWrite();
