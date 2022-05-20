@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Xml;
 
-namespace EBMLGenerateElementsFromXml
+namespace MediaContainersGenerateElementsFromXml
 {
    class Program
    {
@@ -55,7 +55,7 @@ namespace EBMLGenerateElementsFromXml
          }
 
          var result = new StringBuilder();
-         result.AppendLine("namespace EBML");
+         result.AppendLine("namespace MediaContainers");
          result.AppendLine("{");
          result.AppendLine("   public static class ElementDefinition");
          result.AppendLine("   {");
